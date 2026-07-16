@@ -1,0 +1,6 @@
+# Copy to local.properties and edit for your machine.
+sdk.dir=/path/to/Android/Sdk
+
+# Only needed if Meta DAT SDK is provided through GitHub Packages.
+github_username=YOUR_GITHUB_USERNAME
+github_token=YOUR_GITHUB_TOKEN_WITH_READ_PACKAGES
