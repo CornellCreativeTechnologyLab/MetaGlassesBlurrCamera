@@ -37,6 +37,10 @@ import java.util.Map;
  */
 public class CameraWindowActivity extends AppCompatActivity {
 
+    private static final String PREVIEW_RELAY_PREFS = "preview_relay";
+    private static final String PREVIEW_RELAY_URL = "relay_url";
+    private static final String PREVIEW_RELAY_TOKEN = "relay_token";
+
     private ActivityCameraWindowBinding binding;
     private GlassesManager glassesManager;
 
@@ -80,6 +84,7 @@ public class CameraWindowActivity extends AppCompatActivity {
                 runOnUiThread(() -> {
                     pairingStatus = status;
                     updateState();
+                    updatePreviewTestStatus(status);
                 });
             }
 
@@ -117,6 +122,7 @@ public class CameraWindowActivity extends AppCompatActivity {
                 runOnUiThread(() -> {
                     pairingStatus = message;
                     updateState();
+                    updatePreviewTestStatus(message);
                 });
             }
         });
@@ -148,6 +154,18 @@ public class CameraWindowActivity extends AppCompatActivity {
         });
         binding.howtoScrim.setOnClickListener(v -> binding.howtoScrim.setVisibility(View.GONE));
         binding.btnHowtoClose.setOnClickListener(v -> binding.howtoScrim.setVisibility(View.GONE));
+        binding.rowPreviewLab.setOnClickListener(v -> openPreviewTestPage());
+        binding.btnPreviewClose.setOnClickListener(v -> closePreviewTestPage(true));
+        binding.btnPreviewStart.setOnClickListener(v -> startPreviewTest());
+        binding.btnPreviewStop.setOnClickListener(v -> stopPreviewTest());
+        binding.previewRelayUrl.setText(
+                getSharedPreferences(PREVIEW_RELAY_PREFS, MODE_PRIVATE)
+                        .getString(PREVIEW_RELAY_URL, "")
+        );
+        binding.previewRelayToken.setText(
+                getSharedPreferences(PREVIEW_RELAY_PREFS, MODE_PRIVATE)
+                        .getString(PREVIEW_RELAY_TOKEN, "")
+        );
         binding.rowMock.setOnClickListener(v -> {
             binding.menuScrim.setVisibility(View.GONE);
             binding.textStatus.setText("Mock camera…");
@@ -248,6 +266,118 @@ public class CameraWindowActivity extends AppCompatActivity {
             }
         }
         return true;
+    }
+
+    private void openPreviewTestPage() {
+        binding.menuScrim.setVisibility(View.GONE);
+        binding.previewTestScrim.setVisibility(View.VISIBLE);
+        binding.previewTestStatus.setText(
+                glassesManager.isDisplayReady()
+                        ? "Display ready. Choose a mode and frame rate."
+                        : "Pair display-capable glasses and wait for Display ready."
+        );
+        binding.btnPreviewStart.setEnabled(!glassesManager.isDisplayPreviewTestRunning());
+        binding.btnPreviewStop.setEnabled(glassesManager.isDisplayPreviewTestRunning());
+    }
+
+    private void closePreviewTestPage(boolean stopTest) {
+        if (stopTest && glassesManager != null && glassesManager.isDisplayPreviewTestRunning()) {
+            glassesManager.stopDisplayPreviewTest();
+        }
+        binding.previewTestScrim.setVisibility(View.GONE);
+    }
+
+    private void startPreviewTest() {
+        if (!glassesManager.isDisplayReady()) {
+            updatePreviewTestStatus("Display is not ready. Pair the display glasses first.");
+            Toast.makeText(this, "Glasses display is not ready", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        boolean useLiveFrames = binding.modeLiveFrames.isChecked();
+        if (useLiveFrames && !streaming) {
+            updatePreviewTestStatus("Start the blurred camera stream before using live-frame mode.");
+            Toast.makeText(this, "Start the camera stream first", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        String relayUrl = binding.previewRelayUrl.getText().toString().trim();
+        String relayToken = binding.previewRelayToken.getText().toString().trim();
+        if (useLiveFrames && !relayUrl.toLowerCase(Locale.US).startsWith("https://")) {
+            updatePreviewTestStatus("Live mode needs a public HTTPS relay URL.");
+            Toast.makeText(this, "Enter an HTTPS frame relay URL", Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        getSharedPreferences(PREVIEW_RELAY_PREFS, MODE_PRIVATE)
+                .edit()
+                .putString(PREVIEW_RELAY_URL, relayUrl)
+                .putString(PREVIEW_RELAY_TOKEN, relayToken)
+                .apply();
+
+        int fps = selectedPreviewFps();
+        int maxDimension = selectedPreviewDimension();
+        updatePreviewTestStatus(
+                "Starting " + (useLiveFrames ? "live HTTPS relay" : "HTTPS control")
+                        + " test at " + fps + " fps…"
+        );
+        binding.btnPreviewStart.setEnabled(false);
+        binding.btnPreviewStop.setEnabled(true);
+        glassesManager.startDisplayPreviewTest(
+                useLiveFrames,
+                fps,
+                maxDimension,
+                45,
+                relayUrl,
+                relayToken
+        );
+    }
+
+    private void stopPreviewTest() {
+        glassesManager.stopDisplayPreviewTest();
+        binding.btnPreviewStart.setEnabled(true);
+        binding.btnPreviewStop.setEnabled(false);
+    }
+
+    private int selectedPreviewFps() {
+        int checked = binding.previewFpsGroup.getCheckedRadioButtonId();
+        if (checked == R.id.preview_fps_1) return 1;
+        if (checked == R.id.preview_fps_4) return 4;
+        if (checked == R.id.preview_fps_6) return 6;
+        if (checked == R.id.preview_fps_8) return 8;
+        return 2;
+    }
+
+    private int selectedPreviewDimension() {
+        int checked = binding.previewSizeGroup.getCheckedRadioButtonId();
+        if (checked == R.id.preview_size_96) return 96;
+        if (checked == R.id.preview_size_240) return 240;
+        return 160;
+    }
+
+    private void updatePreviewTestStatus(String status) {
+        if (binding == null || binding.previewTestScrim.getVisibility() != View.VISIBLE) return;
+        binding.previewTestStatus.setText(status);
+        boolean running = glassesManager != null && glassesManager.isDisplayPreviewTestRunning();
+        binding.btnPreviewStart.setEnabled(!running);
+        binding.btnPreviewStop.setEnabled(running);
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (binding != null && binding.previewTestScrim.getVisibility() == View.VISIBLE) {
+            closePreviewTestPage(true);
+            return;
+        }
+        if (binding != null && binding.howtoScrim.getVisibility() == View.VISIBLE) {
+            binding.howtoScrim.setVisibility(View.GONE);
+            return;
+        }
+        if (binding != null && binding.menuScrim.getVisibility() == View.VISIBLE) {
+            binding.menuScrim.setVisibility(View.GONE);
+            return;
+        }
+        super.onBackPressed();
     }
 
     private void toggleLive() {

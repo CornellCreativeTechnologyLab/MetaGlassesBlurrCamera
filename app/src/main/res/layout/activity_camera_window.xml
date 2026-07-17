@@ -384,10 +384,14 @@
                 </LinearLayout>
             </LinearLayout>
 
-            <!-- Preview in glasses row -->
+            <!-- Experimental display preview test page -->
             <LinearLayout
+                android:id="@+id/row_preview_lab"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:background="?android:attr/selectableItemBackground"
+                android:clickable="true"
+                android:focusable="true"
                 android:gravity="center_vertical"
                 android:orientation="horizontal"
                 android:paddingHorizontal="20dp"
@@ -410,22 +414,26 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Show Preview in Glasses"
+                        android:text="Glasses Preview Lab"
                         android:textColor="#FFFFFF"
                         android:textSize="14sp" />
 
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Mirror the blurred feed in the lenses"
+                        android:text="Test live frames and display refresh rates"
                         android:textColor="#80FFFFFF"
                         android:textSize="11sp" />
                 </LinearLayout>
 
-                <androidx.appcompat.widget.SwitchCompat
-                    android:id="@+id/switch_preview"
+                <TextView
                     android:layout_width="wrap_content"
-                    android:layout_height="wrap_content" />
+                    android:layout_height="wrap_content"
+                    android:letterSpacing="0.12"
+                    android:text="OPEN"
+                    android:textColor="@color/blurr_accent"
+                    android:textSize="10sp"
+                    android:textStyle="bold" />
             </LinearLayout>
 
             <View
@@ -473,6 +481,348 @@
                 </LinearLayout>
             </LinearLayout>
         </LinearLayout>
+    </FrameLayout>
+
+    <!-- ===================== GLASSES PREVIEW LAB ===================== -->
+    <FrameLayout
+        android:id="@+id/preview_test_scrim"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#FA070709"
+        android:visibility="gone">
+
+        <ScrollView
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:fillViewport="true">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:paddingHorizontal="22dp"
+                android:paddingTop="18dp"
+                android:paddingBottom="28dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:letterSpacing="0.18"
+                            android:text="EXPERIMENTAL"
+                            android:textColor="@color/blurr_accent"
+                            android:textSize="10sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="Glasses Preview Lab"
+                            android:textColor="#FFFFFF"
+                            android:textSize="22sp"
+                            android:textStyle="bold" />
+                    </LinearLayout>
+
+                    <ImageView
+                        android:id="@+id/btn_preview_close"
+                        android:layout_width="38dp"
+                        android:layout_height="38dp"
+                        android:background="@drawable/bg_pill"
+                        android:contentDescription="Close preview lab"
+                        android:padding="10dp"
+                        android:src="@drawable/ic_close" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="18dp"
+                    android:background="@drawable/bg_card"
+                    android:padding="16dp"
+                    android:text="Live mode uploads each blurred camera frame to a public HTTPS relay, then refreshes that image on the glasses. HTTPS control mode cycles known-good remote images so we can measure the display refresh path separately."
+                    android:textColor="#CCFFFFFF"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="22dp"
+                    android:letterSpacing="0.12"
+                    android:text="SOURCE"
+                    android:textColor="#80FFFFFF"
+                    android:textSize="10sp"
+                    android:textStyle="bold" />
+
+                <RadioGroup
+                    android:id="@+id/preview_mode_group"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:background="@drawable/bg_card"
+                    android:orientation="vertical"
+                    android:padding="8dp">
+
+                    <RadioButton
+                        android:id="@+id/mode_live_frames"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:buttonTint="@color/blurr_accent"
+                        android:checked="true"
+                        android:padding="8dp"
+                        android:text="Live blurred frames through HTTPS relay"
+                        android:textColor="#FFFFFF"
+                        android:textSize="14sp" />
+
+                    <RadioButton
+                        android:id="@+id/mode_https_control"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:buttonTint="@color/blurr_accent"
+                        android:padding="8dp"
+                        android:text="HTTPS image sequence (control)"
+                        android:textColor="#FFFFFF"
+                        android:textSize="14sp" />
+                </RadioGroup>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="22dp"
+                    android:letterSpacing="0.12"
+                    android:text="LIVE FRAME RELAY"
+                    android:textColor="#80FFFFFF"
+                    android:textSize="10sp"
+                    android:textStyle="bold" />
+
+                <EditText
+                    android:id="@+id/preview_relay_url"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:background="@drawable/bg_card"
+                    android:hint="https://your-relay.example/frame/random-key"
+                    android:inputType="textUri"
+                    android:maxLines="2"
+                    android:padding="14dp"
+                    android:textColor="#FFFFFF"
+                    android:textColorHint="#66FFFFFF"
+                    android:textSize="12sp" />
+
+                <EditText
+                    android:id="@+id/preview_relay_token"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:background="@drawable/bg_card"
+                    android:hint="Upload token (optional)"
+                    android:inputType="textPassword"
+                    android:maxLines="1"
+                    android:padding="14dp"
+                    android:textColor="#FFFFFF"
+                    android:textColorHint="#66FFFFFF"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="The glasses fetch the URL with GET. The phone uploads JPEG frames to the same URL with PUT and sends the token only in X-Preview-Token."
+                    android:textColor="#66FFFFFF"
+                    android:textSize="10sp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="22dp"
+                    android:letterSpacing="0.12"
+                    android:text="TARGET FRAME RATE"
+                    android:textColor="#80FFFFFF"
+                    android:textSize="10sp"
+                    android:textStyle="bold" />
+
+                <RadioGroup
+                    android:id="@+id/preview_fps_group"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:background="@drawable/bg_card"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:padding="8dp">
+
+                    <RadioButton
+                        android:id="@+id/preview_fps_1"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:buttonTint="@color/blurr_accent"
+                        android:gravity="center"
+                        android:text="1"
+                        android:textColor="#FFFFFF" />
+
+                    <RadioButton
+                        android:id="@+id/preview_fps_2"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:buttonTint="@color/blurr_accent"
+                        android:checked="true"
+                        android:gravity="center"
+                        android:text="2"
+                        android:textColor="#FFFFFF" />
+
+                    <RadioButton
+                        android:id="@+id/preview_fps_4"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:buttonTint="@color/blurr_accent"
+                        android:gravity="center"
+                        android:text="4"
+                        android:textColor="#FFFFFF" />
+
+                    <RadioButton
+                        android:id="@+id/preview_fps_6"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:buttonTint="@color/blurr_accent"
+                        android:gravity="center"
+                        android:text="6"
+                        android:textColor="#FFFFFF" />
+
+                    <RadioButton
+                        android:id="@+id/preview_fps_8"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:buttonTint="@color/blurr_accent"
+                        android:gravity="center"
+                        android:text="8"
+                        android:textColor="#FFFFFF" />
+                </RadioGroup>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="22dp"
+                    android:letterSpacing="0.12"
+                    android:text="LIVE JPEG SIZE"
+                    android:textColor="#80FFFFFF"
+                    android:textSize="10sp"
+                    android:textStyle="bold" />
+
+                <RadioGroup
+                    android:id="@+id/preview_size_group"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:background="@drawable/bg_card"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:padding="8dp">
+
+                    <RadioButton
+                        android:id="@+id/preview_size_96"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:buttonTint="@color/blurr_accent"
+                        android:gravity="center"
+                        android:text="96 px"
+                        android:textColor="#FFFFFF" />
+
+                    <RadioButton
+                        android:id="@+id/preview_size_160"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:buttonTint="@color/blurr_accent"
+                        android:checked="true"
+                        android:gravity="center"
+                        android:text="160 px"
+                        android:textColor="#FFFFFF" />
+
+                    <RadioButton
+                        android:id="@+id/preview_size_240"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:buttonTint="@color/blurr_accent"
+                        android:gravity="center"
+                        android:text="240 px"
+                        android:textColor="#FFFFFF" />
+                </RadioGroup>
+
+                <TextView
+                    android:id="@+id/preview_test_status"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="22dp"
+                    android:background="@drawable/bg_card"
+                    android:minHeight="72dp"
+                    android:padding="16dp"
+                    android:text="Pair display-capable glasses and wait for Display ready."
+                    android:textColor="#E6FFFFFF"
+                    android:textSize="13sp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="18dp"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:id="@+id/btn_preview_start"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginEnd="6dp"
+                        android:layout_weight="1"
+                        android:background="@drawable/bg_pill_accent"
+                        android:gravity="center"
+                        android:paddingVertical="14dp"
+                        android:text="Start test"
+                        android:textColor="#111111"
+                        android:textSize="14sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/btn_preview_stop"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="6dp"
+                        android:layout_weight="1"
+                        android:background="@drawable/bg_pill"
+                        android:enabled="false"
+                        android:gravity="center"
+                        android:paddingVertical="14dp"
+                        android:text="Stop"
+                        android:textColor="#FFFFFF"
+                        android:textSize="14sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="16dp"
+                    android:text="Start live mode at 96 px / 1 fps. Increase to 2 or 4 fps only if upload time and achieved FPS remain stable. The relay URL must return the latest JPEG publicly without authentication."
+                    android:textColor="#80FFFFFF"
+                    android:textSize="11sp" />
+            </LinearLayout>
+        </ScrollView>
     </FrameLayout>
 
     <!-- ===================== HOW-TO SHEET ===================== -->

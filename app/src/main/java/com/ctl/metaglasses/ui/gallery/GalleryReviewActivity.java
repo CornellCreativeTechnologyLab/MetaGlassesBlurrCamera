@@ -370,4 +370,4 @@ public class GalleryReviewActivity extends AppCompatActivity {
         binding = null;
         super.onDestroy();
     }
-}
+}g

@@ -1,0 +1,501 @@
+diff --git a/app/src/main/java/com/ctl/metaglasses/glasses/GlassesManager.kt b/app/src/main/java/com/ctl/metaglasses/glasses/GlassesManager.kt
+index 150f51a..40c5e28 100644
+--- a/app/src/main/java/com/ctl/metaglasses/glasses/GlassesManager.kt
++++ b/app/src/main/java/com/ctl/metaglasses/glasses/GlassesManager.kt
+@@ -6,7 +6,6 @@ import android.graphics.Bitmap
+ import android.os.Handler
+ import android.os.Looper
+ import android.os.SystemClock
+-import android.util.Base64
+ import android.util.Log
+ import androidx.activity.result.ActivityResultCaller
+ import androidx.activity.result.ActivityResultLauncher
+@@ -47,6 +46,8 @@ import kotlinx.coroutines.delay
+ import kotlinx.coroutines.isActive
+ import kotlinx.coroutines.launch
+ import java.io.ByteArrayOutputStream
++import java.net.HttpURLConnection
++import java.net.URL
+ import java.util.Locale
+ 
+ /**
+@@ -542,18 +543,22 @@ class GlassesManager(private val appContext: Context) {
+     }
+ 
+     /**
+-     * Experimental display-refresh test.
++     * Repeatedly refreshes the glasses Display.
+      *
+-     * The public DAT 0.8 Display image API officially documents HTTPS URLs only. The live mode
+-     * deliberately attempts a compact JPEG data URI so we can verify on real hardware whether
+-     * the implementation accepts phone-generated frames anyway. The HTTPS mode cycles official
+-     * sample images and acts as a control for measuring repeated sendContent refresh throughput.
++     * HTTPS control mode cycles Meta-hosted images. Live mode takes the latest blurred camera
++     * frame, compresses it to JPEG, uploads it to a caller-provided HTTPS relay URL, and then asks
++     * the Display to fetch that same URL with a changing cache-buster query parameter.
++     *
++     * The relay is necessary because the public DAT Display image API accepts HTTPS image URLs;
++     * it does not accept an Android Bitmap or a data URI directly.
+      */
+     fun startDisplayPreviewTest(
+         useLiveCameraFrames: Boolean,
+         requestedFps: Int,
+         maxDimension: Int,
+         jpegQuality: Int,
++        relayUrl: String = "",
++        relayToken: String = "",
+     ) {
+         val currentDisplay = display
+         val owner = lifecycleOwner
+@@ -570,13 +575,19 @@ class GlassesManager(private val appContext: Context) {
+             return
+         }
+ 
++        val normalizedRelayUrl = relayUrl.trim()
++        if (useLiveCameraFrames && !normalizedRelayUrl.startsWith("https://", ignoreCase = true)) {
++            postError("Live preview requires an HTTPS frame-relay URL.", null)
++            return
++        }
++
+         stopDisplayPreviewTest(showStoppedCard = false)
+ 
+         val fps = requestedFps.coerceIn(1, 8)
+         val dimension = maxDimension.coerceIn(64, 320)
+         val quality = jpegQuality.coerceIn(20, 80)
+         val periodMs = (1000L / fps).coerceAtLeast(1L)
+-        val modeName = if (useLiveCameraFrames) "live data URI" else "HTTPS control"
++        val modeName = if (useLiveCameraFrames) "live HTTPS relay" else "HTTPS control"
+ 
+         displayPreviewTestJob = owner.lifecycleScope.launch(Dispatchers.IO) {
+             var sequence = 0L
+@@ -584,6 +595,7 @@ class GlassesManager(private val appContext: Context) {
+             var lastReportFrames = 0L
+             var reportStartedAt = SystemClock.elapsedRealtime()
+             var lastPayloadBytes = 0
++            var lastUploadMs = 0L
+ 
+             postStatus("Preview test starting: $modeName at $fps fps...")
+ 
+@@ -595,17 +607,26 @@ class GlassesManager(private val appContext: Context) {
+                         postError("Live frame disappeared; preview test stopped.", null)
+                         break
+                     }
+-                    val encoded = encodePreviewFrame(frame, dimension, quality)
+-                    if (encoded == null) {
++
++                    val jpeg = encodePreviewFrame(frame, dimension, quality)
++                    if (jpeg == null) {
+                         postError("Could not encode a preview frame.", null)
+                         break
+                     }
+-                    lastPayloadBytes = encoded.length
+-                    encoded
++                    lastPayloadBytes = jpeg.size
++
++                    val uploadStartedAt = SystemClock.elapsedRealtime()
++                    val uploadFailure = uploadPreviewFrame(normalizedRelayUrl, relayToken, jpeg)
++                    lastUploadMs = SystemClock.elapsedRealtime() - uploadStartedAt
++                    if (uploadFailure != null) {
++                        postError("Live frame upload failed: $uploadFailure", null)
++                        break
++                    }
++
++                    addCacheBuster(normalizedRelayUrl, sequence)
+                 } else {
+                     val base = HTTPS_PREVIEW_TEST_FRAMES[(sequence % HTTPS_PREVIEW_TEST_FRAMES.size).toInt()]
+-                    // A changing query value discourages stale image reuse while keeping a valid HTTPS URI.
+-                    "$base?blurr_frame=$sequence"
++                    addCacheBuster(base, sequence)
+                 }
+ 
+                 var sendFailure: String? = null
+@@ -628,7 +649,7 @@ class GlassesManager(private val appContext: Context) {
+ 
+                 if (sendFailure != null) {
+                     val hint = if (useLiveCameraFrames) {
+-                        " The public DAT API officially supports HTTPS image URLs; this likely confirms data URIs are rejected. Use an HTTPS latest-frame backend for the real feed."
++                        " Verify that the relay GET URL is public, returns image/jpeg, and does not require an authorization header."
+                     } else {
+                         " The HTTPS control path also failed, so check Display readiness and network access."
+                     }
+@@ -643,7 +664,7 @@ class GlassesManager(private val appContext: Context) {
+                     val deltaFrames = successfulFrames - lastReportFrames
+                     val actualFps = deltaFrames * 1000.0 / reportElapsed.toDouble()
+                     val payload = if (useLiveCameraFrames) {
+-                        " • ${lastPayloadBytes / 1024} KB"
++                        " • ${lastPayloadBytes / 1024} KB • upload ${lastUploadMs} ms"
+                     } else {
+                         ""
+                     }
+@@ -694,7 +715,7 @@ class GlassesManager(private val appContext: Context) {
+         postStatus("Glasses preview test stopped.")
+     }
+ 
+-    private fun encodePreviewFrame(bitmap: Bitmap, maxDimension: Int, quality: Int): String? {
++    private fun encodePreviewFrame(bitmap: Bitmap, maxDimension: Int, quality: Int): ByteArray? {
+         return try {
+             val largestSide = maxOf(bitmap.width, bitmap.height).coerceAtLeast(1)
+             val scale = minOf(1f, maxDimension.toFloat() / largestSide.toFloat())
+@@ -710,14 +731,52 @@ class GlassesManager(private val appContext: Context) {
+             val compressed = scaled.compress(Bitmap.CompressFormat.JPEG, quality, bytes)
+             if (scaled !== bitmap) scaled.recycle()
+             if (!compressed) return null
+-
+-            "data:image/jpeg;base64," + Base64.encodeToString(bytes.toByteArray(), Base64.NO_WRAP)
++            bytes.toByteArray()
+         } catch (e: Exception) {
+             Log.e(TAG, "Preview JPEG encoding failed", e)
+             null
+         }
+     }
+ 
++    /** Returns null on success or a short error message on failure. */
++    private fun uploadPreviewFrame(relayUrl: String, relayToken: String, jpeg: ByteArray): String? {
++        var connection: HttpURLConnection? = null
++        return try {
++            connection = URL(relayUrl).openConnection() as HttpURLConnection
++            connection.requestMethod = "PUT"
++            connection.doOutput = true
++            connection.connectTimeout = 5_000
++            connection.readTimeout = 5_000
++            connection.useCaches = false
++            connection.setRequestProperty("Content-Type", "image/jpeg")
++            connection.setRequestProperty("Cache-Control", "no-store")
++            if (relayToken.isNotBlank()) {
++                connection.setRequestProperty("X-Preview-Token", relayToken)
++            }
++            connection.setFixedLengthStreamingMode(jpeg.size)
++            connection.outputStream.use { output -> output.write(jpeg) }
++
++            val responseCode = connection.responseCode
++            if (responseCode in 200..299) {
++                null
++            } else {
++                val message = runCatching {
++                    connection.errorStream?.bufferedReader()?.use { it.readText() }
++                }.getOrNull().orEmpty().take(240)
++                "HTTP $responseCode${if (message.isBlank()) "" else ": $message"}"
++            }
++        } catch (e: Exception) {
++            e.message ?: e.javaClass.simpleName
++        } finally {
++            connection?.disconnect()
++        }
++    }
++
++    private fun addCacheBuster(baseUrl: String, sequence: Long): String {
++        val separator = if (baseUrl.contains('?')) '&' else '?'
++        return "$baseUrl${separator}blurr_frame=$sequence"
++    }
++
+     fun sendTextToGlasses(text: String) {
+         // Always mirror to the phone-side UI (mock display + translation label).
+         mockDisplay?.let { mock -> mainHandler.post { mock.displayLetter(text) } }
+diff --git a/app/src/main/java/com/ctl/metaglasses/ui/camera/CameraWindowActivity.java b/app/src/main/java/com/ctl/metaglasses/ui/camera/CameraWindowActivity.java
+index 4a0c4f1..e08ca2b 100644
+--- a/app/src/main/java/com/ctl/metaglasses/ui/camera/CameraWindowActivity.java
++++ b/app/src/main/java/com/ctl/metaglasses/ui/camera/CameraWindowActivity.java
+@@ -37,6 +37,10 @@ import java.util.Map;
+  */
+ public class CameraWindowActivity extends AppCompatActivity {
+ 
++    private static final String PREVIEW_RELAY_PREFS = "preview_relay";
++    private static final String PREVIEW_RELAY_URL = "relay_url";
++    private static final String PREVIEW_RELAY_TOKEN = "relay_token";
++
+     private ActivityCameraWindowBinding binding;
+     private GlassesManager glassesManager;
+ 
+@@ -154,6 +158,14 @@ public class CameraWindowActivity extends AppCompatActivity {
+         binding.btnPreviewClose.setOnClickListener(v -> closePreviewTestPage(true));
+         binding.btnPreviewStart.setOnClickListener(v -> startPreviewTest());
+         binding.btnPreviewStop.setOnClickListener(v -> stopPreviewTest());
++        binding.previewRelayUrl.setText(
++                getSharedPreferences(PREVIEW_RELAY_PREFS, MODE_PRIVATE)
++                        .getString(PREVIEW_RELAY_URL, "")
++        );
++        binding.previewRelayToken.setText(
++                getSharedPreferences(PREVIEW_RELAY_PREFS, MODE_PRIVATE)
++                        .getString(PREVIEW_RELAY_TOKEN, "")
++        );
+         binding.rowMock.setOnClickListener(v -> {
+             binding.menuScrim.setVisibility(View.GONE);
+             binding.textStatus.setText("Mock camera…");
+@@ -289,15 +301,36 @@ public class CameraWindowActivity extends AppCompatActivity {
+             return;
+         }
+ 
++        String relayUrl = binding.previewRelayUrl.getText().toString().trim();
++        String relayToken = binding.previewRelayToken.getText().toString().trim();
++        if (useLiveFrames && !relayUrl.toLowerCase(Locale.US).startsWith("https://")) {
++            updatePreviewTestStatus("Live mode needs a public HTTPS relay URL.");
++            Toast.makeText(this, "Enter an HTTPS frame relay URL", Toast.LENGTH_LONG).show();
++            return;
++        }
++
++        getSharedPreferences(PREVIEW_RELAY_PREFS, MODE_PRIVATE)
++                .edit()
++                .putString(PREVIEW_RELAY_URL, relayUrl)
++                .putString(PREVIEW_RELAY_TOKEN, relayToken)
++                .apply();
++
+         int fps = selectedPreviewFps();
+         int maxDimension = selectedPreviewDimension();
+         updatePreviewTestStatus(
+-                "Starting " + (useLiveFrames ? "live-frame" : "HTTPS control")
++                "Starting " + (useLiveFrames ? "live HTTPS relay" : "HTTPS control")
+                         + " test at " + fps + " fps…"
+         );
+         binding.btnPreviewStart.setEnabled(false);
+         binding.btnPreviewStop.setEnabled(true);
+-        glassesManager.startDisplayPreviewTest(useLiveFrames, fps, maxDimension, 45);
++        glassesManager.startDisplayPreviewTest(
++                useLiveFrames,
++                fps,
++                maxDimension,
++                45,
++                relayUrl,
++                relayToken
++        );
+     }
+ 
+     private void stopPreviewTest() {
+diff --git a/app/src/main/res/layout/activity_camera_window.xml b/app/src/main/res/layout/activity_camera_window.xml
+index 584650b..d639a90 100644
+--- a/app/src/main/res/layout/activity_camera_window.xml
++++ b/app/src/main/res/layout/activity_camera_window.xml
+@@ -551,7 +551,7 @@
+                     android:layout_marginTop="18dp"
+                     android:background="@drawable/bg_card"
+                     android:padding="16dp"
+-                    android:text="This test repeatedly replaces the Display content. Live mode tries compact JPEG data URIs from the blurred phone preview. HTTPS control mode cycles known-good remote images so we can measure the display refresh path separately."
++                    android:text="Live mode uploads each blurred camera frame to a public HTTPS relay, then refreshes that image on the glasses. HTTPS control mode cycles known-good remote images so we can measure the display refresh path separately."
+                     android:textColor="#CCFFFFFF"
+                     android:textSize="13sp" />
+ 
+@@ -581,7 +581,7 @@
+                         android:buttonTint="@color/blurr_accent"
+                         android:checked="true"
+                         android:padding="8dp"
+-                        android:text="Live blurred frames (experimental)"
++                        android:text="Live blurred frames through HTTPS relay"
+                         android:textColor="#FFFFFF"
+                         android:textSize="14sp" />
+ 
+@@ -596,6 +596,52 @@
+                         android:textSize="14sp" />
+                 </RadioGroup>
+ 
++                <TextView
++                    android:layout_width="wrap_content"
++                    android:layout_height="wrap_content"
++                    android:layout_marginTop="22dp"
++                    android:letterSpacing="0.12"
++                    android:text="LIVE FRAME RELAY"
++                    android:textColor="#80FFFFFF"
++                    android:textSize="10sp"
++                    android:textStyle="bold" />
++
++                <EditText
++                    android:id="@+id/preview_relay_url"
++                    android:layout_width="match_parent"
++                    android:layout_height="wrap_content"
++                    android:layout_marginTop="8dp"
++                    android:background="@drawable/bg_card"
++                    android:hint="https://your-relay.example/frame/random-key"
++                    android:inputType="textUri"
++                    android:maxLines="2"
++                    android:padding="14dp"
++                    android:textColor="#FFFFFF"
++                    android:textColorHint="#66FFFFFF"
++                    android:textSize="12sp" />
++
++                <EditText
++                    android:id="@+id/preview_relay_token"
++                    android:layout_width="match_parent"
++                    android:layout_height="wrap_content"
++                    android:layout_marginTop="8dp"
++                    android:background="@drawable/bg_card"
++                    android:hint="Upload token (optional)"
++                    android:inputType="textPassword"
++                    android:maxLines="1"
++                    android:padding="14dp"
++                    android:textColor="#FFFFFF"
++                    android:textColorHint="#66FFFFFF"
++                    android:textSize="12sp" />
++
++                <TextView
++                    android:layout_width="match_parent"
++                    android:layout_height="wrap_content"
++                    android:layout_marginTop="8dp"
++                    android:text="The glasses fetch the URL with GET. The phone uploads JPEG frames to the same URL with PUT and sends the token only in X-Preview-Token."
++                    android:textColor="#66FFFFFF"
++                    android:textSize="10sp" />
++
+                 <TextView
+                     android:layout_width="wrap_content"
+                     android:layout_height="wrap_content"
+@@ -772,7 +818,7 @@
+                     android:layout_width="match_parent"
+                     android:layout_height="wrap_content"
+                     android:layout_marginTop="16dp"
+-                    android:text="Recommended order: HTTPS control at 1, 2, 4, then 8 fps. After that, try live mode at 96 px / 1 fps and increase slowly."
++                    android:text="Start live mode at 96 px / 1 fps. Increase to 2 or 4 fps only if upload time and achieved FPS remain stable. The relay URL must return the latest JPEG publicly without authentication."
+                     android:textColor="#80FFFFFF"
+                     android:textSize="11sp" />
+             </LinearLayout>
+diff --git a/tools/frame-relay/README.md b/tools/frame-relay/README.md
+new file mode 100644
+index 0000000..8daa72b
+--- /dev/null
++++ b/tools/frame-relay/README.md
+@@ -0,0 +1,25 @@
++# Blurr HTTPS frame relay
++
++The DAT Display image API fetches HTTPS image URLs. This relay accepts the newest blurred JPEG
++from the phone with `PUT` and serves it publicly with `GET` from the same path.
++
++## Run locally
++
++```powershell
++cd tools\frame-relay
++$env:FRAME_RELAY_TOKEN="choose-a-long-random-token"
++npm start
++```
++
++Expose it with any HTTPS tunnel or deploy it as a small Node web service. For example, after an
++HTTPS tunnel gives you `https://example-tunnel.example`, choose an unguessable path such as:
++
++```text
++https://example-tunnel.example/frame/9f1c2d83a6d04c6eb77b0a5c
++```
++
++Paste that complete URL into **Glasses Preview Lab** and paste the same value used for
++`FRAME_RELAY_TOKEN` into the token field. The phone uses `PUT`; the glasses use public `GET`.
++
++Start at **96 px / 1 fps**. This is a test bridge, not a production streaming architecture. The
++relay stores only the latest frame in memory and loses it when restarted.
+diff --git a/tools/frame-relay/package.json b/tools/frame-relay/package.json
+new file mode 100644
+index 0000000..f0f0ae7
+--- /dev/null
++++ b/tools/frame-relay/package.json
+@@ -0,0 +1,11 @@
++{
++  "name": "blurr-frame-relay",
++  "private": true,
++  "type": "module",
++  "scripts": {
++    "start": "node server.mjs"
++  },
++  "engines": {
++    "node": ">=20"
++  }
++}
+diff --git a/tools/frame-relay/server.mjs b/tools/frame-relay/server.mjs
+new file mode 100644
+index 0000000..6328cfe
+--- /dev/null
++++ b/tools/frame-relay/server.mjs
+@@ -0,0 +1,101 @@
++import http from "node:http";
++import { URL } from "node:url";
++
++const port = Number(process.env.PORT || 8787);
++const requiredToken = process.env.FRAME_RELAY_TOKEN || "";
++const maxFrameBytes = Number(process.env.MAX_FRAME_BYTES || 2_000_000);
++const frames = new Map();
++
++function sendText(res, status, text) {
++  const body = Buffer.from(text, "utf8");
++  res.writeHead(status, {
++    "content-type": "text/plain; charset=utf-8",
++    "content-length": body.length,
++    "cache-control": "no-store",
++  });
++  res.end(body);
++}
++
++function frameKey(pathname) {
++  const match = pathname.match(/^\/frame\/([A-Za-z0-9._~-]{8,160})$/);
++  return match ? match[1] : null;
++}
++
++const server = http.createServer((req, res) => {
++  const requestUrl = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
++
++  if (requestUrl.pathname === "/health") {
++    sendText(res, 200, `ok frames=${frames.size}`);
++    return;
++  }
++
++  const key = frameKey(requestUrl.pathname);
++  if (!key) {
++    sendText(res, 404, "Use GET or PUT /frame/<unguessable-key>");
++    return;
++  }
++
++  if (req.method === "GET" || req.method === "HEAD") {
++    const frame = frames.get(key);
++    if (!frame) {
++      sendText(res, 404, "No frame uploaded yet");
++      return;
++    }
++    res.writeHead(200, {
++      "content-type": "image/jpeg",
++      "content-length": frame.bytes.length,
++      "cache-control": "no-store, no-cache, max-age=0, must-revalidate",
++      pragma: "no-cache",
++      expires: "0",
++      "x-frame-updated-at": String(frame.updatedAt),
++    });
++    if (req.method === "HEAD") res.end();
++    else res.end(frame.bytes);
++    return;
++  }
++
++  if (req.method !== "PUT") {
++    res.setHeader("allow", "GET, HEAD, PUT");
++    sendText(res, 405, "Method not allowed");
++    return;
++  }
++
++  if (requiredToken && req.headers["x-preview-token"] !== requiredToken) {
++    sendText(res, 401, "Invalid X-Preview-Token");
++    return;
++  }
++
++  const contentType = String(req.headers["content-type"] || "").toLowerCase();
++  if (!contentType.startsWith("image/jpeg")) {
++    sendText(res, 415, "Content-Type must be image/jpeg");
++    return;
++  }
++
++  const chunks = [];
++  let received = 0;
++  req.on("data", chunk => {
++    received += chunk.length;
++    if (received > maxFrameBytes) {
++      req.destroy(new Error("Frame too large"));
++      return;
++    }
++    chunks.push(chunk);
++  });
++  req.on("end", () => {
++    if (received === 0) {
++      sendText(res, 400, "Empty frame");
++      return;
++    }
++    frames.set(key, { bytes: Buffer.concat(chunks), updatedAt: Date.now() });
++    res.writeHead(204, { "cache-control": "no-store" });
++    res.end();
++  });
++  req.on("error", error => {
++    if (!res.headersSent) sendText(res, 413, error.message || "Upload failed");
++  });
++});
++
++server.listen(port, "0.0.0.0", () => {
++  console.log(`Blurr frame relay listening on :${port}`);
++  console.log(`PUT/GET /frame/<unguessable-key>`);
++});

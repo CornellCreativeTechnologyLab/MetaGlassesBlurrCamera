@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import androidx.activity.result.ActivityResultCaller
 import androidx.activity.result.ActivityResultLauncher
@@ -30,6 +31,8 @@ import com.meta.wearable.dat.display.addDisplay
 import com.meta.wearable.dat.display.removeDisplay
 import com.meta.wearable.dat.display.types.DisplayState
 import com.meta.wearable.dat.display.views.Alignment
+import com.meta.wearable.dat.display.views.CornerRadius
+import com.meta.wearable.dat.display.views.ImageSize
 import com.meta.wearable.dat.display.views.TextStyle
 import com.meta.wearable.dat.mockdevice.MockDeviceKit
 import com.meta.wearable.dat.mockdevice.api.GlassesModel
@@ -39,7 +42,13 @@ import com.ctl.metaglasses.vision.FaceBlurProcessor
 import com.ctl.metaglasses.vision.TFLiteAgeClassifier
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.io.ByteArrayOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.Locale
 
 /**
  * Glasses integration using the Meta Wearables DAT SDK (0.8).
@@ -56,6 +65,17 @@ class GlassesManager(private val appContext: Context) {
 
     companion object {
         private const val TAG = "GlassesManager"
+
+        // Stable HTTPS images from Meta's own DisplayAccess sample. These are used as a
+        // control path: if these can be pushed repeatedly but live data URIs cannot, the
+        // bottleneck is the public image transport rather than Display refresh itself.
+        private val HTTPS_PREVIEW_TEST_FRAMES = listOf(
+            "https://www.facebook.com/assets/wearables_dat_display/oil_square.png",
+            "https://www.facebook.com/assets/wearables_dat_display/tire_square.png",
+            "https://www.facebook.com/assets/wearables_dat_display/light_square.png",
+            "https://www.facebook.com/assets/wearables_dat_display/engine_square.png",
+            "https://www.facebook.com/assets/wearables_dat_display/washer_square.png",
+        )
     }
 
     interface Listener {
@@ -85,6 +105,7 @@ class GlassesManager(private val appContext: Context) {
     private var videoJob: Job? = null
     private var streamStateJob: Job? = null
     private var streamErrorJob: Job? = null
+    private var displayPreviewTestJob: Job? = null
     private var connected = false
     private var streaming = false
     private var sessionRequested = false
@@ -101,6 +122,7 @@ class GlassesManager(private val appContext: Context) {
     // If a letter arrives before the display is ready, remember the latest one
     // and send it as soon as DisplayState.STARTED fires.
     private var pendingText: String? = null
+    @Volatile private var latestPreviewFrame: Bitmap? = null
 
     // Real-time face blurring applied to camera frames before they reach the UI.
     private val faceBlurProcessor by lazy { FaceBlurProcessor(TFLiteAgeClassifier(appContext)) }
@@ -130,6 +152,8 @@ class GlassesManager(private val appContext: Context) {
 
     fun isConnected(): Boolean = connected
     fun isStreaming(): Boolean = streaming
+    fun isDisplayReady(): Boolean = displayReady && display != null
+    fun isDisplayPreviewTestRunning(): Boolean = displayPreviewTestJob?.isActive == true
 
     fun connect(activity: Activity) {
         try {
@@ -514,7 +538,243 @@ class GlassesManager(private val appContext: Context) {
                 Log.e(TAG, "Face blur failed: ${e.message}")
             }
         }
+        latestPreviewFrame = work
         listener?.let { l -> mainHandler.post { l.onCameraFrame(work) } }
+    }
+
+    /**
+     * Repeatedly refreshes the glasses Display.
+     *
+     * HTTPS control mode cycles Meta-hosted images. Live mode takes the latest blurred camera
+     * frame, compresses it to JPEG, uploads it to a caller-provided HTTPS relay URL, and then asks
+     * the Display to fetch that same URL with a changing cache-buster query parameter.
+     *
+     * The relay is necessary because the public DAT Display image API accepts HTTPS image URLs;
+     * it does not accept an Android Bitmap or a data URI directly.
+     */
+    fun startDisplayPreviewTest(
+        useLiveCameraFrames: Boolean,
+        requestedFps: Int,
+        maxDimension: Int,
+        jpegQuality: Int,
+        relayUrl: String = "",
+        relayToken: String = "",
+    ) {
+        val currentDisplay = display
+        val owner = lifecycleOwner
+        if (owner == null) {
+            postError("Lifecycle owner is unavailable.", null)
+            return
+        }
+        if (currentDisplay == null || !displayReady) {
+            postError("Glasses display is not ready. Pair display-capable glasses first.", null)
+            return
+        }
+        if (useLiveCameraFrames && latestPreviewFrame == null) {
+            postError("No blurred camera frame is available yet. Start the camera stream first.", null)
+            return
+        }
+
+        val normalizedRelayUrl = relayUrl.trim()
+        if (useLiveCameraFrames && !normalizedRelayUrl.startsWith("https://", ignoreCase = true)) {
+            postError("Live preview requires an HTTPS frame-relay URL.", null)
+            return
+        }
+
+        stopDisplayPreviewTest(showStoppedCard = false)
+
+        val fps = requestedFps.coerceIn(1, 8)
+        val dimension = maxDimension.coerceIn(64, 320)
+        val quality = jpegQuality.coerceIn(20, 80)
+        val periodMs = (1000L / fps).coerceAtLeast(1L)
+        val modeName = if (useLiveCameraFrames) "live HTTPS relay" else "HTTPS control"
+
+        displayPreviewTestJob = owner.lifecycleScope.launch(Dispatchers.IO) {
+            var sequence = 0L
+            var successfulFrames = 0L
+            var lastReportFrames = 0L
+            var reportStartedAt = SystemClock.elapsedRealtime()
+            var lastPayloadBytes = 0
+            var lastUploadMs = 0L
+
+            postStatus("Preview test starting: $modeName at $fps fps...")
+
+            while (isActive) {
+                val iterationStartedAt = SystemClock.elapsedRealtime()
+                val uri = if (useLiveCameraFrames) {
+                    val frame = latestPreviewFrame
+                    if (frame == null) {
+                        postError("Live frame disappeared; preview test stopped.", null)
+                        break
+                    }
+
+                    val jpeg = encodePreviewFrame(frame, dimension, quality)
+                    if (jpeg == null) {
+                        postError("Could not encode a preview frame.", null)
+                        break
+                    }
+                    lastPayloadBytes = jpeg.size
+
+                    val uploadStartedAt = SystemClock.elapsedRealtime()
+                    val uploadFailure = uploadPreviewFrame(normalizedRelayUrl, relayToken, jpeg)
+                    lastUploadMs = SystemClock.elapsedRealtime() - uploadStartedAt
+                    if (uploadFailure != null) {
+                        postError("Live frame upload failed: $uploadFailure", null)
+                        break
+                    }
+
+                    addCacheBuster(normalizedRelayUrl, sequence)
+                } else {
+                    val base = HTTPS_PREVIEW_TEST_FRAMES[(sequence % HTTPS_PREVIEW_TEST_FRAMES.size).toInt()]
+                    addCacheBuster(base, sequence)
+                }
+
+                var sendFailure: String? = null
+                currentDisplay.sendContent {
+                    flexBox(
+                        padding = 0,
+                        alignment = Alignment.CENTER,
+                        crossAlignment = Alignment.CENTER,
+                    ) {
+                        image(
+                            uri = uri,
+                            sizePreset = ImageSize.FILL,
+                            cornerRadius = CornerRadius.MEDIUM,
+                        )
+                    }
+                }.fold(
+                    onSuccess = { successfulFrames++ },
+                    onFailure = { error, _ -> sendFailure = error.description },
+                )
+
+                if (sendFailure != null) {
+                    val hint = if (useLiveCameraFrames) {
+                        " Verify that the relay GET URL is public, returns image/jpeg, and does not require an authorization header."
+                    } else {
+                        " The HTTPS control path also failed, so check Display readiness and network access."
+                    }
+                    postError("Preview frame send failed: $sendFailure.$hint", null)
+                    break
+                }
+
+                sequence++
+                val now = SystemClock.elapsedRealtime()
+                val reportElapsed = now - reportStartedAt
+                if (reportElapsed >= 1000L) {
+                    val deltaFrames = successfulFrames - lastReportFrames
+                    val actualFps = deltaFrames * 1000.0 / reportElapsed.toDouble()
+                    val payload = if (useLiveCameraFrames) {
+                        " • ${lastPayloadBytes / 1024} KB • upload ${lastUploadMs} ms"
+                    } else {
+                        ""
+                    }
+                    postStatus(
+                        String.format(
+                            Locale.US,
+                            "Preview test: %.1f fps actual / %d requested%s",
+                            actualFps,
+                            fps,
+                            payload,
+                        )
+                    )
+                    lastReportFrames = successfulFrames
+                    reportStartedAt = now
+                }
+
+                val workMs = SystemClock.elapsedRealtime() - iterationStartedAt
+                val remaining = periodMs - workMs
+                if (remaining > 0) delay(remaining)
+            }
+        }
+    }
+
+    fun stopDisplayPreviewTest() {
+        stopDisplayPreviewTest(showStoppedCard = true)
+    }
+
+    private fun stopDisplayPreviewTest(showStoppedCard: Boolean) {
+        displayPreviewTestJob?.cancel()
+        displayPreviewTestJob = null
+
+        if (!showStoppedCard) return
+        val currentDisplay = display ?: return
+        val owner = lifecycleOwner ?: return
+        jobs += owner.lifecycleScope.launch {
+            currentDisplay.sendContent {
+                flexBox(
+                    padding = 24,
+                    alignment = Alignment.CENTER,
+                    crossAlignment = Alignment.CENTER,
+                ) {
+                    text("Preview test stopped", style = TextStyle.BODY)
+                }
+            }.onFailure { error, _ ->
+                Log.w(TAG, "Could not send preview-stopped card: ${error.description}")
+            }
+        }
+        postStatus("Glasses preview test stopped.")
+    }
+
+    private fun encodePreviewFrame(bitmap: Bitmap, maxDimension: Int, quality: Int): ByteArray? {
+        return try {
+            val largestSide = maxOf(bitmap.width, bitmap.height).coerceAtLeast(1)
+            val scale = minOf(1f, maxDimension.toFloat() / largestSide.toFloat())
+            val targetWidth = (bitmap.width * scale).toInt().coerceAtLeast(1)
+            val targetHeight = (bitmap.height * scale).toInt().coerceAtLeast(1)
+            val scaled = if (targetWidth == bitmap.width && targetHeight == bitmap.height) {
+                bitmap
+            } else {
+                Bitmap.createScaledBitmap(bitmap, targetWidth, targetHeight, true)
+            }
+
+            val bytes = ByteArrayOutputStream()
+            val compressed = scaled.compress(Bitmap.CompressFormat.JPEG, quality, bytes)
+            if (scaled !== bitmap) scaled.recycle()
+            if (!compressed) return null
+            bytes.toByteArray()
+        } catch (e: Exception) {
+            Log.e(TAG, "Preview JPEG encoding failed", e)
+            null
+        }
+    }
+
+    /** Returns null on success or a short error message on failure. */
+    private fun uploadPreviewFrame(relayUrl: String, relayToken: String, jpeg: ByteArray): String? {
+        var connection: HttpURLConnection? = null
+        return try {
+            connection = URL(relayUrl).openConnection() as HttpURLConnection
+            connection.requestMethod = "PUT"
+            connection.doOutput = true
+            connection.connectTimeout = 5_000
+            connection.readTimeout = 5_000
+            connection.useCaches = false
+            connection.setRequestProperty("Content-Type", "image/jpeg")
+            connection.setRequestProperty("Cache-Control", "no-store")
+            if (relayToken.isNotBlank()) {
+                connection.setRequestProperty("X-Preview-Token", relayToken)
+            }
+            connection.setFixedLengthStreamingMode(jpeg.size)
+            connection.outputStream.use { output -> output.write(jpeg) }
+
+            val responseCode = connection.responseCode
+            if (responseCode in 200..299) {
+                null
+            } else {
+                val message = runCatching {
+                    connection.errorStream?.bufferedReader()?.use { it.readText() }
+                }.getOrNull().orEmpty().take(240)
+                "HTTP $responseCode${if (message.isBlank()) "" else ": $message"}"
+            }
+        } catch (e: Exception) {
+            e.message ?: e.javaClass.simpleName
+        } finally {
+            connection?.disconnect()
+        }
+    }
+
+    private fun addCacheBuster(baseUrl: String, sequence: Long): String {
+        val separator = if (baseUrl.contains('?')) '&' else '?'
+        return "$baseUrl${separator}blurr_frame=$sequence"
     }
 
     fun sendTextToGlasses(text: String) {
@@ -559,6 +819,8 @@ class GlassesManager(private val appContext: Context) {
         sessionStarted = false
         streamRequested = false
         pendingText = null
+        latestPreviewFrame = null
+        stopDisplayPreviewTest(showStoppedCard = false)
 
         deviceWaitJob?.cancel(); deviceWaitJob = null
         videoJob?.cancel(); videoJob = null
