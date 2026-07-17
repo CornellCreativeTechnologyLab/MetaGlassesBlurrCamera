@@ -44,16 +44,29 @@ class FaceBlurProcessor(private val ageClassifier: AgeClassifier) {
      */
     fun process(bitmap: Bitmap, mode: BlurMode): Bitmap {
         if (mode == BlurMode.OFF) return bitmap
+        val boxes = facesToBlur(bitmap, mode)
+        if (boxes.isNotEmpty()) blurBoxes(bitmap, boxes)
+        return bitmap
+    }
+
+    /**
+     * Detects faces in [bitmap] and returns the padded boxes that should be blurred under [mode]
+     * (all faces for [BlurMode.ALL_FACES]; only likely-minors for [BlurMode.MINORS_ONLY]). Boxes are
+     * in [bitmap] pixel space. Blocking — call off the main thread. Used both to blur the live
+     * preview and to record the face map at capture time so blurring stays non-destructive.
+     */
+    fun facesToBlur(bitmap: Bitmap, mode: BlurMode): List<Rect> {
+        if (mode == BlurMode.OFF) return emptyList()
 
         val faces = try {
             Tasks.await(detector.process(InputImage.fromBitmap(bitmap, 0)))
         } catch (e: Exception) {
             Log.e(TAG, "Face detection failed: ${e.message}")
-            return bitmap
+            return emptyList()
         }
-        if (faces.isEmpty()) return bitmap
+        if (faces.isEmpty()) return emptyList()
 
-        val canvas = Canvas(bitmap)
+        val result = ArrayList<Rect>(faces.size)
         for (face in faces) {
             val box = clampToBitmap(face.boundingBox, bitmap.width, bitmap.height) ?: continue
             val shouldBlur = when (mode) {
@@ -66,9 +79,16 @@ class FaceBlurProcessor(private val ageClassifier: AgeClassifier) {
                 }
                 BlurMode.OFF -> false
             }
-            if (shouldBlur) pixelate(bitmap, canvas, box)
+            if (shouldBlur) result.add(box)
         }
-        return bitmap
+        return result
+    }
+
+    /** Pixelates each of [boxes] in place on [bitmap]. */
+    fun blurBoxes(bitmap: Bitmap, boxes: List<Rect>) {
+        if (boxes.isEmpty()) return
+        val canvas = Canvas(bitmap)
+        for (box in boxes) pixelate(bitmap, canvas, box)
     }
 
     private fun clampToBitmap(r: Rect, w: Int, h: Int): Rect? {

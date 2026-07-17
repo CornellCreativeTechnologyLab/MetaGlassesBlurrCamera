@@ -15,6 +15,9 @@ kotlin = "2.1.0"
 kotlinxCoroutines = "1.8.0"
 mlkitFaceDetection = "16.1.7"
 tensorflowLite = "2.16.1"
+onnxRuntime = "1.19.2"
+playServicesAuth = "21.2.0"
+rootEncoder = "2.4.7"
 cameraX = "1.3.4"
 lifecycleRuntimeKtx = "2.11.0"
 
@@ -37,6 +40,9 @@ mwdat-display = { group = "com.meta.wearable", name = "mwdat-display", version.r
 mwdat-mockdevice = { group = "com.meta.wearable", name = "mwdat-mockdevice", version.ref = "mwdat" }
 mlkit-face-detection = { group = "com.google.mlkit", name = "face-detection", version.ref = "mlkitFaceDetection" }
 tensorflow-lite = { group = "org.tensorflow", name = "tensorflow-lite", version.ref = "tensorflowLite" }
+onnxruntime-android = { group = "com.microsoft.onnxruntime", name = "onnxruntime-android", version.ref = "onnxRuntime" }
+play-services-auth = { group = "com.google.android.gms", name = "play-services-auth", version.ref = "playServicesAuth" }
+rootencoder = { group = "com.github.pedroSG94.RootEncoder", name = "library", version.ref = "rootEncoder" }
 camera-core = { group = "androidx.camera", name = "camera-core", version.ref = "cameraX" }
 camera-camera2 = { group = "androidx.camera", name = "camera-camera2", version.ref = "cameraX" }
 camera-lifecycle = { group = "androidx.camera", name = "camera-lifecycle", version.ref = "cameraX" }

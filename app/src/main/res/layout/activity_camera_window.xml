@@ -642,77 +642,49 @@
                     android:textColor="#66FFFFFF"
                     android:textSize="10sp" />
 
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="22dp"
-                    android:letterSpacing="0.12"
-                    android:text="TARGET FRAME RATE"
-                    android:textColor="#80FFFFFF"
-                    android:textSize="10sp"
-                    android:textStyle="bold" />
-
-                <RadioGroup
-                    android:id="@+id/preview_fps_group"
+                <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:background="@drawable/bg_card"
+                    android:layout_marginTop="22dp"
                     android:gravity="center_vertical"
-                    android:orientation="horizontal"
-                    android:padding="8dp">
+                    android:orientation="horizontal">
 
-                    <RadioButton
-                        android:id="@+id/preview_fps_1"
+                    <TextView
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
-                        android:buttonTint="@color/blurr_accent"
-                        android:gravity="center"
-                        android:text="1"
-                        android:textColor="#FFFFFF" />
+                        android:letterSpacing="0.12"
+                        android:text="TARGET FRAME RATE"
+                        android:textColor="#80FFFFFF"
+                        android:textSize="10sp"
+                        android:textStyle="bold" />
 
-                    <RadioButton
-                        android:id="@+id/preview_fps_2"
-                        android:layout_width="0dp"
+                    <TextView
+                        android:id="@+id/preview_fps_value"
+                        android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:buttonTint="@color/blurr_accent"
-                        android:checked="true"
-                        android:gravity="center"
-                        android:text="2"
-                        android:textColor="#FFFFFF" />
+                        android:text="2 fps"
+                        android:textColor="@color/blurr_accent"
+                        android:textSize="13sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
 
-                    <RadioButton
-                        android:id="@+id/preview_fps_4"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:buttonTint="@color/blurr_accent"
-                        android:gravity="center"
-                        android:text="4"
-                        android:textColor="#FFFFFF" />
+                <SeekBar
+                    android:id="@+id/preview_fps_slider"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:max="80"
+                    android:progress="2"
+                    android:progressTint="@color/blurr_accent"
+                    android:thumbTint="@color/blurr_accent" />
 
-                    <RadioButton
-                        android:id="@+id/preview_fps_6"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:buttonTint="@color/blurr_accent"
-                        android:gravity="center"
-                        android:text="6"
-                        android:textColor="#FFFFFF" />
-
-                    <RadioButton
-                        android:id="@+id/preview_fps_8"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:buttonTint="@color/blurr_accent"
-                        android:gravity="center"
-                        android:text="8"
-                        android:textColor="#FFFFFF" />
-                </RadioGroup>
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="0 = uncapped (push as fast as the link allows). Higher targets are experimental — the display link may not sustain them."
+                    android:textColor="#66FFFFFF"
+                    android:textSize="10sp" />
 
                 <TextView
                     android:layout_width="wrap_content"

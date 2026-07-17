@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/gallery_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="#000000"
@@ -50,6 +51,16 @@
         </LinearLayout>
 
         <ImageView
+            android:id="@+id/btn_save"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_marginEnd="8dp"
+            android:background="@drawable/bg_pill"
+            android:contentDescription="Save to phone gallery"
+            android:padding="10dp"
+            android:src="@drawable/ic_download" />
+
+        <ImageView
             android:id="@+id/btn_share"
             android:layout_width="40dp"
             android:layout_height="40dp"
@@ -70,43 +81,6 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:orientation="vertical">
-
-            <!-- Export state badges -->
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:gravity="center_vertical"
-                android:orientation="horizontal"
-                android:paddingHorizontal="16dp"
-                android:paddingBottom="10dp">
-
-                <TextView
-                    android:id="@+id/badge_watermark"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:background="@drawable/bg_pill_white"
-                    android:drawableStart="@drawable/ic_lock"
-                    android:drawablePadding="6dp"
-                    android:paddingHorizontal="12dp"
-                    android:paddingVertical="7dp"
-                    android:text="Watermarked · download off"
-                    android:textColor="#111111"
-                    android:textSize="11sp" />
-
-                <TextView
-                    android:id="@+id/badge_accessible"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="8dp"
-                    android:background="@drawable/bg_pill"
-                    android:drawableStart="@drawable/ic_unlock"
-                    android:drawablePadding="6dp"
-                    android:paddingHorizontal="12dp"
-                    android:paddingVertical="7dp"
-                    android:text="Accessible"
-                    android:textColor="#99FFFFFF"
-                    android:textSize="11sp" />
-            </LinearLayout>
 
             <!-- Player -->
             <FrameLayout
@@ -131,6 +105,13 @@
                     android:layout_width="match_parent"
                     android:layout_height="match_parent"
                     android:contentDescription="Selected video"
+                    android:visibility="gone" />
+
+                <!-- Real detected-face boxes are added here at runtime (see GalleryReviewActivity). -->
+                <FrameLayout
+                    android:id="@+id/face_overlay"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
                     android:visibility="gone" />
 
                 <LinearLayout
@@ -164,81 +145,6 @@
                         android:textStyle="bold" />
                 </LinearLayout>
 
-                <FrameLayout
-                    android:id="@+id/face0"
-                    android:layout_width="58dp"
-                    android:layout_height="58dp"
-                    android:layout_marginStart="52dp"
-                    android:layout_marginTop="150dp"
-                    android:background="@drawable/bg_face_box_white"
-                    android:visibility="gone">
-
-                    <ImageView
-                        android:id="@+id/check0"
-                        android:layout_width="18dp"
-                        android:layout_height="18dp"
-                        android:layout_gravity="top|end"
-                        android:layout_margin="-6dp"
-                        android:background="@drawable/bg_check_badge"
-                        android:padding="3dp"
-                        android:src="@drawable/ic_check"
-                        android:visibility="gone" />
-                </FrameLayout>
-
-                <FrameLayout
-                    android:id="@+id/face1"
-                    android:layout_width="58dp"
-                    android:layout_height="58dp"
-                    android:layout_gravity="center_horizontal"
-                    android:layout_marginTop="148dp"
-                    android:background="@drawable/bg_face_box_accent"
-                    android:visibility="gone">
-
-                    <ImageView
-                        android:id="@+id/check1"
-                        android:layout_width="18dp"
-                        android:layout_height="18dp"
-                        android:layout_gravity="top|end"
-                        android:layout_margin="-6dp"
-                        android:background="@drawable/bg_check_badge"
-                        android:padding="3dp"
-                        android:src="@drawable/ic_check" />
-                </FrameLayout>
-
-                <FrameLayout
-                    android:id="@+id/face2"
-                    android:layout_width="48dp"
-                    android:layout_height="48dp"
-                    android:layout_gravity="end"
-                    android:layout_marginTop="155dp"
-                    android:layout_marginEnd="60dp"
-                    android:background="@drawable/bg_face_box_white"
-                    android:visibility="gone">
-
-                    <ImageView
-                        android:id="@+id/check2"
-                        android:layout_width="18dp"
-                        android:layout_height="18dp"
-                        android:layout_gravity="top|end"
-                        android:layout_margin="-6dp"
-                        android:background="@drawable/bg_check_badge"
-                        android:padding="3dp"
-                        android:src="@drawable/ic_check"
-                        android:visibility="gone" />
-                </FrameLayout>
-
-                <TextView
-                    android:id="@+id/watermark"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_gravity="bottom|end"
-                    android:layout_margin="12dp"
-                    android:letterSpacing="0.3"
-                    android:rotation="-4"
-                    android:text="BLURR · PREVIEW"
-                    android:textColor="#B3FFFFFF"
-                    android:textSize="10sp" />
-
                 <ImageView
                     android:id="@+id/btn_play"
                     android:layout_width="64dp"
@@ -250,6 +156,46 @@
                     android:src="@drawable/ic_play"
                     android:visibility="gone" />
             </FrameLayout>
+
+            <!-- Video timeline scrubber (shown only for videos) -->
+            <LinearLayout
+                android:id="@+id/scrubber_row"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingHorizontal="16dp"
+                android:paddingTop="10dp"
+                android:visibility="gone">
+
+                <TextView
+                    android:id="@+id/time_current"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:minWidth="40dp"
+                    android:text="0:00"
+                    android:textColor="#CCFFFFFF"
+                    android:textSize="11sp" />
+
+                <SeekBar
+                    android:id="@+id/video_seek"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:max="1000"
+                    android:progressTint="@color/blurr_accent"
+                    android:thumbTint="@color/blurr_accent" />
+
+                <TextView
+                    android:id="@+id/time_duration"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:minWidth="40dp"
+                    android:gravity="end"
+                    android:text="0:00"
+                    android:textColor="#CCFFFFFF"
+                    android:textSize="11sp" />
+            </LinearLayout>
 
             <!-- Primary actions -->
             <LinearLayout

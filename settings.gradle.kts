@@ -23,6 +23,8 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // RootEncoder (RTMP push library) is published on JitPack.
+        maven { url = uri("https://jitpack.io") }
         maven {
             url = uri("https://maven.pkg.github.com/facebook/meta-wearables-dat-android")
             credentials {

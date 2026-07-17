@@ -20,11 +20,14 @@ import androidx.core.content.ContextCompat;
 
 import com.ctl.metaglasses.databinding.ActivityTrialBinding;
 import com.ctl.metaglasses.vision.BlurMode;
+import com.ctl.metaglasses.vision.EnsembleAgeClassifier;
 import com.ctl.metaglasses.vision.FaceBlurProcessor;
+import com.ctl.metaglasses.vision.OnnxAgeClassifier;
 import com.ctl.metaglasses.vision.TFLiteAgeClassifier;
 import com.google.common.util.concurrent.ListenableFuture;
 
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -61,7 +64,9 @@ public class TrialActivity extends AppCompatActivity {
         binding = ActivityTrialBinding.inflate(getLayoutInflater());
         setContentView(binding.getRoot());
 
-        processor = new FaceBlurProcessor(new TFLiteAgeClassifier(this));
+        processor = new FaceBlurProcessor(new EnsembleAgeClassifier(Arrays.asList(
+                new TFLiteAgeClassifier(this),
+                new OnnxAgeClassifier(this))));
         analysisExecutor = Executors.newSingleThreadExecutor();
 
         binding.buttonMode.setOnClickListener(v -> cycleMode());

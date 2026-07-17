@@ -78,9 +78,15 @@ dependencies {
     implementation(libs.mwdat.display)
     implementation(libs.mwdat.mockdevice)
 
-    // On-device face detection (real-time) + slot for a fine-tuned age classifier.
+    // On-device face detection (real-time) + fine-tuned age classifiers.
     implementation(libs.mlkit.face.detection)
     implementation(libs.tensorflow.lite)
+    // Second age model (ONNX logistic-regression) used in a voting ensemble with the TFLite one.
+    implementation(libs.onnxruntime.android)
+
+    // YouTube live: Google Sign-In (OAuth token for the YouTube scope) + RootEncoder (RTMP push).
+    implementation(libs.play.services.auth)
+    implementation(libs.rootencoder)
 
     // Phone-camera trial mode (standalone, no glasses).
     implementation(libs.camera.core)

@@ -3,6 +3,7 @@ package com.ctl.metaglasses.glasses
 import android.app.Activity
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -32,13 +33,17 @@ import com.meta.wearable.dat.display.removeDisplay
 import com.meta.wearable.dat.display.types.DisplayState
 import com.meta.wearable.dat.display.views.Alignment
 import com.meta.wearable.dat.display.views.CornerRadius
+import com.meta.wearable.dat.display.views.Direction
 import com.meta.wearable.dat.display.views.ImageSize
+import com.meta.wearable.dat.display.views.TextColor
 import com.meta.wearable.dat.display.views.TextStyle
 import com.meta.wearable.dat.mockdevice.MockDeviceKit
 import com.meta.wearable.dat.mockdevice.api.GlassesModel
 import com.meta.wearable.dat.mockdevice.api.camera.CameraFacing
 import com.ctl.metaglasses.vision.BlurMode
+import com.ctl.metaglasses.vision.EnsembleAgeClassifier
 import com.ctl.metaglasses.vision.FaceBlurProcessor
+import com.ctl.metaglasses.vision.OnnxAgeClassifier
 import com.ctl.metaglasses.vision.TFLiteAgeClassifier
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -78,6 +83,11 @@ class GlassesManager(private val appContext: Context) {
         )
     }
 
+    /** Delivered on the main thread when [capturePhoto] grabs the next processed frame. */
+    interface PhotoCaptureCallback {
+        fun onPhoto(original: Bitmap, blurred: Bitmap, boxes: Array<Rect>)
+    }
+
     interface Listener {
         fun onStatusChanged(status: String)
         fun onFrameReceived(frameBytes: ByteArray, width: Int, height: Int, timestampMillis: Long)
@@ -106,6 +116,11 @@ class GlassesManager(private val appContext: Context) {
     private var streamStateJob: Job? = null
     private var streamErrorJob: Job? = null
     private var displayPreviewTestJob: Job? = null
+    private var recordingIndicatorJob: Job? = null
+    // Set while a recording is in progress so the glasses "REC" card can (re)start as soon as
+    // the display is ready — even if recording began before the display attached.
+    @Volatile private var recordingActive = false
+    private var recordingStartedAt = 0L
     private var connected = false
     private var streaming = false
     private var sessionRequested = false
@@ -123,9 +138,20 @@ class GlassesManager(private val appContext: Context) {
     // and send it as soon as DisplayState.STARTED fires.
     private var pendingText: String? = null
     @Volatile private var latestPreviewFrame: Bitmap? = null
+    @Volatile private var pendingPhotoCapture: PhotoCaptureCallback? = null
 
-    // Real-time face blurring applied to camera frames before they reach the UI.
-    private val faceBlurProcessor by lazy { FaceBlurProcessor(TFLiteAgeClassifier(appContext)) }
+    // Real-time face blurring applied to camera frames before they reach the UI. The minor check is
+    // an ensemble vote between the TFLite age-regression model and the ONNX logistic-regression model.
+    private val faceBlurProcessor by lazy {
+        FaceBlurProcessor(
+            EnsembleAgeClassifier(
+                listOf(
+                    TFLiteAgeClassifier(appContext),
+                    OnnxAgeClassifier(appContext),
+                )
+            )
+        )
+    }
     @Volatile private var blurMode = BlurMode.OFF
 
     /** OFF, ALL_FACES, or MINORS_ONLY. Applied live to the camera preview. */
@@ -350,6 +376,8 @@ class GlassesManager(private val appContext: Context) {
                                 pendingText = null
                                 renderText(queued)
                             }
+                            // If recording started before the display was ready, show the card now.
+                            if (recordingActive) startRecordingIndicatorLoop()
                         } else {
                             displayReady = false
                         }
@@ -486,8 +514,13 @@ class GlassesManager(private val appContext: Context) {
     private fun attachStream(session: DeviceSession) {
         val owner = lifecycleOwner ?: return
 
+        // Quality over smoothness: HIGH is the glasses' top resolution (720x1280 vs MEDIUM's
+        // 504x896), and a lower frame rate gives each frame more Bluetooth bandwidth, so every
+        // frame is compressed less and looks sharper/less grainy in both preview and captures.
+        // Valid frame rates are 2/7/15/24/30; 15 keeps motion reasonable while maximizing per-frame
+        // quality. Drop to 7 if HIGH@15 can't hold a steady stream over your link.
         session.addStream(
-            StreamConfiguration(videoQuality = VideoQuality.MEDIUM, frameRate = 24),
+            StreamConfiguration(videoQuality = VideoQuality.HIGH, frameRate = 15),
         ).onSuccess { newStream ->
             stream = newStream
             postStatus("Camera stream starting...")
@@ -526,19 +559,44 @@ class GlassesManager(private val appContext: Context) {
         }
     }
 
+    /**
+     * Requests a still: the next processed frame is delivered to [callback] as the pristine original,
+     * the blurred version, and the detected face boxes — enough to store a non-destructive capture.
+     */
+    fun capturePhoto(callback: PhotoCaptureCallback) {
+        pendingPhotoCapture = callback
+    }
+
     private fun handleVideoFrame(frame: VideoFrame) {
         val bitmap = YuvToBitmapConverter.convert(frame.buffer, frame.width, frame.height) ?: return
         // Mutable copy so we can blur in place and the UI can hold it while the converter
         // reuses its cached bitmap for the next frame.
         val work = bitmap.copy(Bitmap.Config.ARGB_8888, true) ?: return
+
+        // Snapshot the pristine (pre-blur) frame only when a photo is actually being captured, so
+        // the hot path stays a single copy in the common case.
+        val capture = pendingPhotoCapture
+        val originalForCapture =
+            if (capture != null) work.copy(Bitmap.Config.ARGB_8888, false) else null
+
+        var boxes: List<Rect> = emptyList()
         if (blurMode != BlurMode.OFF) {
             try {
-                faceBlurProcessor.process(work, blurMode)
+                boxes = faceBlurProcessor.facesToBlur(work, blurMode)
+                faceBlurProcessor.blurBoxes(work, boxes)
             } catch (e: Exception) {
                 Log.e(TAG, "Face blur failed: ${e.message}")
             }
         }
         latestPreviewFrame = work
+
+        if (capture != null && originalForCapture != null) {
+            pendingPhotoCapture = null
+            val blurredForCapture = work.copy(Bitmap.Config.ARGB_8888, false)
+            val boxArray = boxes.toTypedArray()
+            mainHandler.post { capture.onPhoto(originalForCapture, blurredForCapture, boxArray) }
+        }
+
         listener?.let { l -> mainHandler.post { l.onCameraFrame(work) } }
     }
 
@@ -583,10 +641,13 @@ class GlassesManager(private val appContext: Context) {
 
         stopDisplayPreviewTest(showStoppedCard = false)
 
-        val fps = requestedFps.coerceIn(1, 8)
+        // 0 = uncapped (no inter-frame delay); otherwise target up to 80 fps. High targets are
+        // experimental — the display link and relay upload usually cap the achievable rate well
+        // below this, which is exactly what the actual-vs-requested readout is for.
+        val fps = requestedFps.coerceIn(0, 80)
         val dimension = maxDimension.coerceIn(64, 320)
         val quality = jpegQuality.coerceIn(20, 80)
-        val periodMs = (1000L / fps).coerceAtLeast(1L)
+        val periodMs = if (fps <= 0) 0L else (1000L / fps).coerceAtLeast(1L)
         val modeName = if (useLiveCameraFrames) "live HTTPS relay" else "HTTPS control"
 
         displayPreviewTestJob = owner.lifecycleScope.launch(Dispatchers.IO) {
@@ -811,6 +872,93 @@ class GlassesManager(private val appContext: Context) {
         }
     }
 
+    /**
+     * Shows a live "recording" card on the glasses display: a blinking red dot, a "REC" label and
+     * the elapsed recording time (MM:SS). Call when recording starts. Safe to call before the
+     * display is ready — the card starts automatically once DisplayState.STARTED fires.
+     */
+    fun startRecordingIndicator() {
+        recordingActive = true
+        recordingStartedAt = SystemClock.elapsedRealtime()
+        startRecordingIndicatorLoop()
+    }
+
+    /** Stops the recording card and clears the display. Call when recording stops. */
+    fun stopRecordingIndicator() {
+        recordingActive = false
+        recordingIndicatorJob?.cancel()
+        recordingIndicatorJob = null
+
+        val currentDisplay = display ?: return
+        val owner = lifecycleOwner ?: return
+        jobs += owner.lifecycleScope.launch {
+            currentDisplay.sendContent {
+                flexBox(
+                    padding = 24,
+                    alignment = Alignment.CENTER,
+                    crossAlignment = Alignment.CENTER,
+                ) {
+                    text("Recording saved", style = TextStyle.BODY)
+                }
+            }.onFailure { error, _ ->
+                Log.w(TAG, "Could not clear recording card: ${error.description}")
+            }
+            // Let the confirmation linger briefly, then blank the display so it doesn't stay up.
+            delay(3000L)
+            if (!recordingActive) {
+                currentDisplay.sendContent {
+                    flexBox(padding = 0, alignment = Alignment.CENTER, crossAlignment = Alignment.CENTER) {}
+                }.onFailure { error, _ ->
+                    Log.w(TAG, "Could not blank recording card: ${error.description}")
+                }
+            }
+        }
+    }
+
+    /**
+     * Drives the blinking "REC ● MM:SS" card. Refreshes ~2x/second: the dot alternates between a
+     * bright and dim color (so it reads as a blinking light without the row width jumping) while
+     * the elapsed time counts up from [recordingStartedAt]. No-op until the display is ready.
+     */
+    private fun startRecordingIndicatorLoop() {
+        if (!recordingActive) return
+        if (recordingIndicatorJob?.isActive == true) return
+        val owner = lifecycleOwner ?: return
+        val currentDisplay = display
+        if (currentDisplay == null || !displayReady) {
+            Log.d(TAG, "Recording indicator deferred: glasses display not ready.")
+            return
+        }
+
+        recordingIndicatorJob = owner.lifecycleScope.launch(Dispatchers.IO) {
+            var dotOn = true
+            while (isActive && recordingActive) {
+                val elapsedSec = (SystemClock.elapsedRealtime() - recordingStartedAt) / 1000L
+                val timeLabel = String.format(
+                    Locale.US, "%02d:%02d", elapsedSec / 60, elapsedSec % 60,
+                )
+                val dotColor = if (dotOn) TextColor.PRIMARY else TextColor.SECONDARY
+                currentDisplay.sendContent {
+                    flexBox(
+                        direction = Direction.ROW,
+                        gap = 12,
+                        padding = 24,
+                        alignment = Alignment.CENTER,
+                        crossAlignment = Alignment.CENTER,
+                    ) {
+                        text("●", style = TextStyle.HEADING, color = dotColor)
+                        text("REC", style = TextStyle.HEADING)
+                        text(timeLabel, style = TextStyle.HEADING, color = TextColor.SECONDARY)
+                    }
+                }.onFailure { error, _ ->
+                    Log.w(TAG, "Recording indicator send failed: ${error.description}")
+                }
+                dotOn = !dotOn
+                delay(500L)
+            }
+        }
+    }
+
     fun disconnect() {
         streaming = false
         connected = false
@@ -820,6 +968,9 @@ class GlassesManager(private val appContext: Context) {
         streamRequested = false
         pendingText = null
         latestPreviewFrame = null
+        pendingPhotoCapture = null
+        recordingActive = false
+        recordingIndicatorJob?.cancel(); recordingIndicatorJob = null
         stopDisplayPreviewTest(showStoppedCard = false)
 
         deviceWaitJob?.cancel(); deviceWaitJob = null
