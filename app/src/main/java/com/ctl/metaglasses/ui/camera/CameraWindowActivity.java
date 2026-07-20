@@ -270,8 +270,8 @@ public class CameraWindowActivity extends AppCompatActivity {
                 // Grab the next frame with its pristine original + detected faces, so the saved
                 // photo stays non-destructively editable in the gallery.
                 Toast.makeText(this, "Capturing…", Toast.LENGTH_SHORT).show();
-                glassesManager.capturePhoto((original, blurred, boxes) ->
-                        MediaSaver.savePhotoNonDestructive(this, blurred, original, boxes,
+                glassesManager.capturePhoto((original, blurred, regions) ->
+                        MediaSaver.savePhotoNonDestructive(this, blurred, original, regions,
                                 () -> Toast.makeText(this, "Photo saved to Blurr album",
                                         Toast.LENGTH_SHORT).show()));
             } else {

@@ -1,12 +1,14 @@
 package com.ctl.metaglasses.vision;
 
 import android.graphics.Bitmap;
+import android.graphics.PointF;
 import android.graphics.Rect;
 import android.util.Log;
 
 import com.google.android.gms.tasks.Tasks;
 import com.google.mlkit.vision.common.InputImage;
 import com.google.mlkit.vision.face.Face;
+import com.google.mlkit.vision.face.FaceContour;
 import com.google.mlkit.vision.face.FaceDetection;
 import com.google.mlkit.vision.face.FaceDetector;
 import com.google.mlkit.vision.face.FaceDetectorOptions;
@@ -34,15 +36,17 @@ public final class FaceScanner {
                     .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
                     .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_NONE)
                     .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_NONE)
+                    // Contours give the real face outline so gallery blur follows the face shape.
+                    .setContourMode(FaceDetectorOptions.CONTOUR_MODE_ALL)
                     .setMinFaceSize(0.08f)
                     .build());
         }
         return detector;
     }
 
-    /** Detects faces in [bitmap] and returns padded, clamped boxes in bitmap pixel space. */
-    public static List<Rect> detect(Bitmap bitmap) {
-        List<Rect> out = new ArrayList<>();
+    /** Detects faces in [bitmap] and returns padded regions (box + contour) in bitmap pixel space. */
+    public static List<FaceRegion> detect(Bitmap bitmap) {
+        List<FaceRegion> out = new ArrayList<>();
         if (bitmap == null) return out;
         try {
             List<Face> faces = Tasks.await(detector().process(InputImage.fromBitmap(bitmap, 0)));
@@ -50,10 +54,23 @@ public final class FaceScanner {
             int h = bitmap.getHeight();
             for (Face face : faces) {
                 Rect box = pad(face.getBoundingBox(), w, h);
-                if (box != null) out.add(box);
+                if (box != null) out.add(new FaceRegion(box, contourPoints(face)));
             }
         } catch (Exception e) {
             Log.e(TAG, "detect failed: " + e.getMessage());
+        }
+        return out;
+    }
+
+    private static float[] contourPoints(Face face) {
+        FaceContour contour = face.getContour(FaceContour.FACE);
+        if (contour == null) return null;
+        List<PointF> points = contour.getPoints();
+        if (points == null || points.size() < 3) return null;
+        float[] out = new float[points.size() * 2];
+        for (int i = 0; i < points.size(); i++) {
+            out[2 * i] = points.get(i).x;
+            out[2 * i + 1] = points.get(i).y;
         }
         return out;
     }

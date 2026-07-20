@@ -39,13 +39,20 @@ public class FaceMap {
     public static class Face {
         public int left, top, right, bottom;
         public boolean blurred;
+        /** Face-outline polygon {x0,y0,...} in image px, or null (then blur uses an oval in the box). */
+        public float[] contour;
 
         public Face(int left, int top, int right, int bottom, boolean blurred) {
+            this(left, top, right, bottom, blurred, null);
+        }
+
+        public Face(int left, int top, int right, int bottom, boolean blurred, float[] contour) {
             this.left = left;
             this.top = top;
             this.right = right;
             this.bottom = bottom;
             this.blurred = blurred;
+            this.contour = contour;
         }
 
         public Rect rect() {
@@ -64,6 +71,18 @@ public class FaceMap {
         if (boxes != null) {
             for (Rect r : boxes) {
                 map.faces.add(new Face(r.left, r.top, r.right, r.bottom, true));
+            }
+        }
+        return map;
+    }
+
+    /** Builds a map from detected regions (box + contour); every face starts blurred. */
+    public static FaceMap fromRegions(int width, int height, FaceRegion[] regions) {
+        FaceMap map = new FaceMap(width, height);
+        if (regions != null) {
+            for (FaceRegion r : regions) {
+                map.faces.add(new Face(r.box.left, r.box.top, r.box.right, r.box.bottom, true,
+                        r.contour));
             }
         }
         return map;
@@ -90,6 +109,11 @@ public class FaceMap {
                 o.put("right", f.right);
                 o.put("bottom", f.bottom);
                 o.put("blurred", f.blurred);
+                if (f.contour != null && f.contour.length >= 6) {
+                    JSONArray c = new JSONArray();
+                    for (float v : f.contour) c.put(Math.round(v));
+                    o.put("contour", c);
+                }
                 arr.put(o);
             }
             root.put("faces", arr);
@@ -106,10 +130,16 @@ public class FaceMap {
         if (arr != null) {
             for (int i = 0; i < arr.length(); i++) {
                 JSONObject o = arr.getJSONObject(i);
+                float[] contour = null;
+                JSONArray c = o.optJSONArray("contour");
+                if (c != null && c.length() >= 6) {
+                    contour = new float[c.length()];
+                    for (int k = 0; k < c.length(); k++) contour[k] = (float) c.optDouble(k);
+                }
                 map.faces.add(new Face(
                         o.optInt("left"), o.optInt("top"),
                         o.optInt("right"), o.optInt("bottom"),
-                        o.optBoolean("blurred", true)));
+                        o.optBoolean("blurred", true), contour));
             }
         }
         return map;

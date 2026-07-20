@@ -13,6 +13,7 @@ import android.util.Log;
 
 import com.ctl.metaglasses.vision.BlurEditStore;
 import com.ctl.metaglasses.vision.FaceMap;
+import com.ctl.metaglasses.vision.FaceRegion;
 
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -70,7 +71,7 @@ public final class MediaSaver {
      * privately (keyed by the same timestamp id) so the blur can be toggled/exported later.
      */
     public static void savePhotoNonDestructive(Context context, Bitmap blurred, Bitmap original,
-                                               Rect[] boxes, Runnable onDone) {
+                                               FaceRegion[] regions, Runnable onDone) {
         final Context app = context.getApplicationContext();
         final long id = System.currentTimeMillis();
         new Thread(() -> {
@@ -91,8 +92,8 @@ public final class MediaSaver {
                 done.put(MediaStore.Images.Media.IS_PENDING, 0);
                 resolver.update(uri, done, null, null);
 
-                // The non-destructive editing record (original + face map).
-                FaceMap map = FaceMap.fromBoxes(original.getWidth(), original.getHeight(), boxes);
+                // The non-destructive editing record (original + face map with contours).
+                FaceMap map = FaceMap.fromRegions(original.getWidth(), original.getHeight(), regions);
                 BlurEditStore.save(app, id, original, map);
             } catch (Exception e) {
                 Log.e(TAG, "savePhotoNonDestructive failed: " + e.getMessage());

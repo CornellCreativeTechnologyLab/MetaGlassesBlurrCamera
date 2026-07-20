@@ -43,6 +43,7 @@ import com.meta.wearable.dat.mockdevice.api.camera.CameraFacing
 import com.ctl.metaglasses.vision.BlurMode
 import com.ctl.metaglasses.vision.EnsembleAgeClassifier
 import com.ctl.metaglasses.vision.FaceBlurProcessor
+import com.ctl.metaglasses.vision.FaceRegion
 import com.ctl.metaglasses.vision.OnnxAgeClassifier
 import com.ctl.metaglasses.vision.TFLiteAgeClassifier
 import kotlinx.coroutines.Dispatchers
@@ -71,6 +72,10 @@ class GlassesManager(private val appContext: Context) {
     companion object {
         private const val TAG = "GlassesManager"
 
+        // How often to re-run face detection (1 = every frame). 2 = every other frame; faces are
+        // reused on skipped frames. Higher = cheaper but blur lags faster-moving faces.
+        private const val DETECT_EVERY_N_FRAMES = 2L
+
         // Stable HTTPS images from Meta's own DisplayAccess sample. These are used as a
         // control path: if these can be pushed repeatedly but live data URIs cannot, the
         // bottleneck is the public image transport rather than Display refresh itself.
@@ -85,7 +90,7 @@ class GlassesManager(private val appContext: Context) {
 
     /** Delivered on the main thread when [capturePhoto] grabs the next processed frame. */
     interface PhotoCaptureCallback {
-        fun onPhoto(original: Bitmap, blurred: Bitmap, boxes: Array<Rect>)
+        fun onPhoto(original: Bitmap, blurred: Bitmap, regions: Array<FaceRegion>)
     }
 
     interface Listener {
@@ -140,6 +145,11 @@ class GlassesManager(private val appContext: Context) {
     @Volatile private var latestPreviewFrame: Bitmap? = null
     @Volatile private var pendingPhotoCapture: PhotoCaptureCallback? = null
 
+    // Face-detection throttling: detect every Nth frame and reuse the faces in between (the blur
+    // itself still runs every frame). Keeps faces covered as they move while saving detection cost.
+    private var frameIndex = 0L
+    @Volatile private var cachedFaceRegions: List<FaceRegion> = emptyList()
+
     // Real-time face blurring applied to camera frames before they reach the UI. The minor check is
     // an ensemble vote between the TFLite age-regression model and the ONNX logistic-regression model.
     private val faceBlurProcessor by lazy {
@@ -157,6 +167,7 @@ class GlassesManager(private val appContext: Context) {
     /** OFF, ALL_FACES, or MINORS_ONLY. Applied live to the camera preview. */
     fun setBlurMode(mode: BlurMode) {
         blurMode = mode
+        cachedFaceRegions = emptyList() // re-detect fresh under the new mode
     }
 
     fun getBlurMode(): BlurMode = blurMode
@@ -500,6 +511,7 @@ class GlassesManager(private val appContext: Context) {
     fun stopVideoStream() {
         streamRequested = false
         streaming = false
+        cachedFaceRegions = emptyList()
 
         videoJob?.cancel(); videoJob = null
         streamStateJob?.cancel(); streamStateJob = null
@@ -579,11 +591,21 @@ class GlassesManager(private val appContext: Context) {
         val originalForCapture =
             if (capture != null) work.copy(Bitmap.Config.ARGB_8888, false) else null
 
-        var boxes: List<Rect> = emptyList()
+        var regions: List<FaceRegion> = cachedFaceRegions
         if (blurMode != BlurMode.OFF) {
             try {
-                boxes = faceBlurProcessor.facesToBlur(work, blurMode)
-                faceBlurProcessor.blurBoxes(work, boxes)
+                // Re-detect only every Nth frame (or immediately for a capture / after a gap) and
+                // reuse the last faces in between — the blur still runs every frame, but the costly
+                // contour detection doesn't, which cuts CPU and latency while faces stay in scene.
+                val mustDetect = capture != null ||
+                    cachedFaceRegions.isEmpty() ||
+                    (frameIndex % DETECT_EVERY_N_FRAMES == 0L)
+                if (mustDetect) {
+                    cachedFaceRegions = faceBlurProcessor.facesToBlur(work, blurMode)
+                }
+                frameIndex++
+                regions = cachedFaceRegions
+                faceBlurProcessor.blurRegions(work, regions)
             } catch (e: Exception) {
                 Log.e(TAG, "Face blur failed: ${e.message}")
             }
@@ -593,8 +615,8 @@ class GlassesManager(private val appContext: Context) {
         if (capture != null && originalForCapture != null) {
             pendingPhotoCapture = null
             val blurredForCapture = work.copy(Bitmap.Config.ARGB_8888, false)
-            val boxArray = boxes.toTypedArray()
-            mainHandler.post { capture.onPhoto(originalForCapture, blurredForCapture, boxArray) }
+            val regionArray = regions.toTypedArray()
+            mainHandler.post { capture.onPhoto(originalForCapture, blurredForCapture, regionArray) }
         }
 
         listener?.let { l -> mainHandler.post { l.onCameraFrame(work) } }

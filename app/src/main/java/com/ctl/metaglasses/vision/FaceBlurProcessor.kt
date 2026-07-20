@@ -6,6 +6,7 @@ import android.graphics.Rect
 import android.util.Log
 import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.face.FaceContour
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
 
@@ -22,7 +23,6 @@ class FaceBlurProcessor(private val ageClassifier: AgeClassifier) {
 
     private companion object {
         const val TAG = "FaceBlurProcessor"
-        const val MOSAIC = 30 // larger = coarser (more obscured) blocks
         const val FACE_PADDING = 0.25f // grow the face box so hair/jaw/ears are covered too
     }
 
@@ -31,6 +31,8 @@ class FaceBlurProcessor(private val ageClassifier: AgeClassifier) {
             .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
             .setLandmarkMode(FaceDetectorOptions.LANDMARK_MODE_NONE)
             .setClassificationMode(FaceDetectorOptions.CLASSIFICATION_MODE_NONE)
+            // Contours give the real face outline so the blur follows the face, not a square.
+            .setContourMode(FaceDetectorOptions.CONTOUR_MODE_ALL)
             .setMinFaceSize(0.1f)
             .build()
     )
@@ -44,18 +46,19 @@ class FaceBlurProcessor(private val ageClassifier: AgeClassifier) {
      */
     fun process(bitmap: Bitmap, mode: BlurMode): Bitmap {
         if (mode == BlurMode.OFF) return bitmap
-        val boxes = facesToBlur(bitmap, mode)
-        if (boxes.isNotEmpty()) blurBoxes(bitmap, boxes)
+        val regions = facesToBlur(bitmap, mode)
+        if (regions.isNotEmpty()) blurRegions(bitmap, regions)
         return bitmap
     }
 
     /**
-     * Detects faces in [bitmap] and returns the padded boxes that should be blurred under [mode]
-     * (all faces for [BlurMode.ALL_FACES]; only likely-minors for [BlurMode.MINORS_ONLY]). Boxes are
-     * in [bitmap] pixel space. Blocking — call off the main thread. Used both to blur the live
-     * preview and to record the face map at capture time so blurring stays non-destructive.
+     * Detects faces in [bitmap] and returns the regions that should be blurred under [mode] (all
+     * faces for [BlurMode.ALL_FACES]; only likely-minors for [BlurMode.MINORS_ONLY]). Each region
+     * carries a padded bounding box plus the ML Kit face-outline contour (when available), both in
+     * [bitmap] pixel space. Blocking — call off the main thread. Used both to blur the live preview
+     * and to record the face map at capture time so blurring stays non-destructive.
      */
-    fun facesToBlur(bitmap: Bitmap, mode: BlurMode): List<Rect> {
+    fun facesToBlur(bitmap: Bitmap, mode: BlurMode): List<FaceRegion> {
         if (mode == BlurMode.OFF) return emptyList()
 
         val faces = try {
@@ -66,7 +69,7 @@ class FaceBlurProcessor(private val ageClassifier: AgeClassifier) {
         }
         if (faces.isEmpty()) return emptyList()
 
-        val result = ArrayList<Rect>(faces.size)
+        val result = ArrayList<FaceRegion>(faces.size)
         for (face in faces) {
             val box = clampToBitmap(face.boundingBox, bitmap.width, bitmap.height) ?: continue
             val shouldBlur = when (mode) {
@@ -79,16 +82,28 @@ class FaceBlurProcessor(private val ageClassifier: AgeClassifier) {
                 }
                 BlurMode.OFF -> false
             }
-            if (shouldBlur) result.add(box)
+            if (shouldBlur) result.add(FaceRegion(box, contourPoints(face)))
         }
         return result
     }
 
-    /** Pixelates each of [boxes] in place on [bitmap]. */
-    fun blurBoxes(bitmap: Bitmap, boxes: List<Rect>) {
-        if (boxes.isEmpty()) return
+    /** Softly blurs each region in place on [bitmap], clipped to its (feathered) face shape. */
+    fun blurRegions(bitmap: Bitmap, regions: List<FaceRegion>) {
+        if (regions.isEmpty()) return
         val canvas = Canvas(bitmap)
-        for (box in boxes) pixelate(bitmap, canvas, box)
+        for (r in regions) BlurRenderer.blurRegion(bitmap, canvas, r.box, r.contour)
+    }
+
+    /** Flattens the ML Kit FACE contour into {x0,y0,x1,y1,...}, or null if unavailable. */
+    private fun contourPoints(face: com.google.mlkit.vision.face.Face): FloatArray? {
+        val points = face.getContour(FaceContour.FACE)?.points ?: return null
+        if (points.size < 3) return null
+        val out = FloatArray(points.size * 2)
+        for (i in points.indices) {
+            out[2 * i] = points[i].x
+            out[2 * i + 1] = points[i].y
+        }
+        return out
     }
 
     private fun clampToBitmap(r: Rect, w: Int, h: Int): Rect? {
@@ -100,23 +115,6 @@ class FaceBlurProcessor(private val ageClassifier: AgeClassifier) {
         val right = (r.right + padX).coerceIn(left + 1, w)
         val bottom = (r.bottom + padY).coerceIn(top + 1, h)
         return if (right > left && bottom > top) Rect(left, top, right, bottom) else null
-    }
-
-    private fun pixelate(bitmap: Bitmap, canvas: Canvas, box: Rect) {
-        val w = box.width()
-        val h = box.height()
-        val crop = Bitmap.createBitmap(bitmap, box.left, box.top, w, h)
-        val small = Bitmap.createScaledBitmap(
-            crop,
-            (w / MOSAIC).coerceAtLeast(1),
-            (h / MOSAIC).coerceAtLeast(1),
-            false,
-        )
-        val mosaic = Bitmap.createScaledBitmap(small, w, h, false)
-        canvas.drawBitmap(mosaic, box.left.toFloat(), box.top.toFloat(), null)
-        crop.recycle()
-        small.recycle()
-        mosaic.recycle()
     }
 
     fun close() {

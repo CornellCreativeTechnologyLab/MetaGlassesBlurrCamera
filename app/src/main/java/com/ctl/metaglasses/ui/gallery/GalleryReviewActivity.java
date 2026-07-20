@@ -20,6 +20,7 @@ import android.widget.LinearLayout;
 import android.widget.SeekBar;
 import android.widget.Toast;
 
+import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.FileProvider;
 import androidx.core.graphics.Insets;
@@ -29,18 +30,23 @@ import androidx.core.view.WindowInsetsCompat;
 import com.ctl.metaglasses.R;
 import com.ctl.metaglasses.databinding.ActivityGalleryReviewBinding;
 import com.ctl.metaglasses.recording.MediaSaver;
+import com.ctl.metaglasses.video.VideoBlurProcessor;
 import com.ctl.metaglasses.vision.BlurEditStore;
 import com.ctl.metaglasses.vision.BlurRenderer;
 import com.ctl.metaglasses.vision.FaceMap;
+import com.ctl.metaglasses.vision.FaceRegion;
 import com.ctl.metaglasses.vision.FaceScanner;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -72,6 +78,10 @@ public class GalleryReviewActivity extends AppCompatActivity {
 
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final List<MediaItem> items = new ArrayList<>();
+
+    // Video face-blur editor (offline transcode).
+    private VideoBlurProcessor videoProcessor;
+    private AlertDialog progressDialog;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final Runnable scrubTick = new Runnable() {
@@ -107,11 +117,11 @@ public class GalleryReviewActivity extends AppCompatActivity {
         binding.btnPlay.setOnClickListener(v -> togglePlayback());
         configureVideoPlayer();
         configureScrubber();
+        videoProcessor = new VideoBlurProcessor(this);
 
         binding.btnSelectFaces.setOnClickListener(v -> {
             if (selectedItem != null && selectedItem.isVideo) {
-                Toast.makeText(this, "Face editing is available on photos, not videos.",
-                        Toast.LENGTH_SHORT).show();
+                startVideoBlur(); // scan for people, then let the user choose who to blur
                 return;
             }
             if (!editable) {
@@ -131,8 +141,7 @@ public class GalleryReviewActivity extends AppCompatActivity {
         });
         binding.btnBlurAll.setOnClickListener(v -> {
             if (selectedItem != null && selectedItem.isVideo) {
-                Toast.makeText(this, "Face editing is available on photos, not videos.",
-                        Toast.LENGTH_SHORT).show();
+                confirmBlurAllVideo(); // blur everyone in the video, no per-person picking
                 return;
             }
             if (!editable || editMap == null || editMap.faces.isEmpty()) {
@@ -358,10 +367,11 @@ public class GalleryReviewActivity extends AppCompatActivity {
                 });
                 return;
             }
-            java.util.List<Rect> boxes = FaceScanner.detect(bmp);
+            java.util.List<FaceRegion> regions = FaceScanner.detect(bmp);
             FaceMap map = new FaceMap(bmp.getWidth(), bmp.getHeight());
-            for (Rect r : boxes) {
-                map.faces.add(new FaceMap.Face(r.left, r.top, r.right, r.bottom, false));
+            for (FaceRegion r : regions) {
+                map.faces.add(new FaceMap.Face(
+                        r.box.left, r.box.top, r.box.right, r.box.bottom, false, r.contour));
             }
             ui.post(() -> {
                 if (binding == null || selectedItem != item) {
@@ -624,6 +634,121 @@ public class GalleryReviewActivity extends AppCompatActivity {
         startActivity(Intent.createChooser(send, "Share"));
     }
 
+    // ---------------------------------------------------------- video blur
+
+    /** Scans the selected video for distinct people, then lets the user pick who to blur. */
+    private void startVideoBlur() {
+        if (selectedItem == null || !selectedItem.isVideo) return;
+        final Uri uri = selectedItem.uri;
+        progressDialog = showProgress("Scanning video for people…");
+        videoProcessor.scan(uri, new VideoBlurProcessor.ScanCallback() {
+            @Override
+            public void onProgress(float f) {
+                setProgressMessage("Scanning… " + Math.round(f * 100) + "%");
+            }
+
+            @Override
+            public void onComplete(List<VideoBlurProcessor.Person> people) {
+                dismissProgress();
+                choosePeopleThenApply(uri, people);
+            }
+
+            @Override
+            public void onError(String message) {
+                dismissProgress();
+                Toast.makeText(GalleryReviewActivity.this, message, Toast.LENGTH_LONG).show();
+            }
+        });
+    }
+
+    private void choosePeopleThenApply(Uri uri, List<VideoBlurProcessor.Person> people) {
+        if (people.isEmpty()) {
+            new AlertDialog.Builder(this)
+                    .setTitle("No distinct people detected")
+                    .setMessage("Blur every face in this video anyway?")
+                    .setPositiveButton("Blur all", (d, w) -> applyVideoBlur(uri, Collections.emptySet()))
+                    .setNegativeButton("Cancel", null)
+                    .show();
+            return;
+        }
+        final boolean[] checked = new boolean[people.size()];
+        Arrays.fill(checked, true);
+        final String[] labels = new String[people.size()];
+        for (int i = 0; i < people.size(); i++) labels[i] = "Person " + (i + 1);
+        new AlertDialog.Builder(this)
+                .setTitle("Who to blur (" + people.size() + " found)")
+                .setMultiChoiceItems(labels, checked, (d, which, isChecked) -> checked[which] = isChecked)
+                .setPositiveButton("Blur", (d, w) -> {
+                    Set<Integer> ids = new HashSet<>();
+                    for (int i = 0; i < people.size(); i++) {
+                        if (checked[i]) ids.add(people.get(i).trackingId);
+                    }
+                    if (ids.isEmpty()) {
+                        Toast.makeText(this, "No one selected.", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    applyVideoBlur(uri, ids);
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void confirmBlurAllVideo() {
+        if (selectedItem == null || !selectedItem.isVideo) return;
+        final Uri uri = selectedItem.uri;
+        new AlertDialog.Builder(this)
+                .setTitle("Blur all faces")
+                .setMessage("Process this video and blur every detected face? This can take a while.")
+                .setPositiveButton("Blur all", (d, w) -> applyVideoBlur(uri, Collections.emptySet()))
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    /** Transcodes the video with the chosen people blurred and saves a new copy to Photos. */
+    private void applyVideoBlur(Uri uri, Set<Integer> blurIds) {
+        progressDialog = showProgress("Blurring video… this can take a while");
+        videoProcessor.apply(uri, blurIds, new VideoBlurProcessor.ApplyCallback() {
+            @Override
+            public void onProgress(float f) {
+                setProgressMessage("Blurring… " + Math.round(f * 100) + "%");
+            }
+
+            @Override
+            public void onComplete(Uri outputUri) {
+                dismissProgress();
+                Toast.makeText(GalleryReviewActivity.this,
+                        "Saved blurred video to Photos (DCIM/Blurr)", Toast.LENGTH_LONG).show();
+                loadGallery();
+            }
+
+            @Override
+            public void onError(String message) {
+                dismissProgress();
+                Toast.makeText(GalleryReviewActivity.this, message, Toast.LENGTH_LONG).show();
+            }
+        });
+    }
+
+    private AlertDialog showProgress(String message) {
+        AlertDialog d = new AlertDialog.Builder(this)
+                .setMessage(message)
+                .setCancelable(false)
+                .create();
+        d.show();
+        return d;
+    }
+
+    private void setProgressMessage(String message) {
+        if (progressDialog != null && progressDialog.isShowing()) progressDialog.setMessage(message);
+    }
+
+    private void dismissProgress() {
+        if (progressDialog != null) {
+            progressDialog.dismiss();
+            progressDialog = null;
+        }
+    }
+
     // ---------------------------------------------------------------- data
 
     private void loadThumb(Uri uri, Size size, ImageView target) {
@@ -682,6 +807,8 @@ public class GalleryReviewActivity extends AppCompatActivity {
     protected void onDestroy() {
         stopPlaybackAndReset();
         clearEditState();
+        dismissProgress();
+        if (videoProcessor != null) videoProcessor.release();
         io.shutdownNow();
         binding = null;
         super.onDestroy();
