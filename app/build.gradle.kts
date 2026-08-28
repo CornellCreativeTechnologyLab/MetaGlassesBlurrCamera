@@ -28,8 +28,12 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        manifestPlaceholders["mwdat_application_id"] = mwdatCredential("mwdat_application_id")
-        manifestPlaceholders["mwdat_client_token"] = mwdatCredential("mwdat_client_token")
+        // These MUST reach the manifest as string resources, not as inline android:value literals.
+        // A bare numeric value (Developer Mode uses "0") is compiled as an integer, so the SDK's
+        // metaData.getString(...) returns null and logs "the app might be misconfigured" — which
+        // kills the DWA stream channel with SERVICE_NOT_FOUND and no video frames ever arrive.
+        resValue("string", "mwdat_application_id", mwdatCredential("mwdat_application_id"))
+        resValue("string", "mwdat_client_token", mwdatCredential("mwdat_client_token"))
     }
 
     buildTypes {
@@ -83,6 +87,9 @@ dependencies {
     implementation(libs.tensorflow.lite)
     // Second age model (ONNX logistic-regression) used in a voting ensemble with the TFLite one.
     implementation(libs.onnxruntime.android)
+    // Keeps full-quality HEIC still captures correctly oriented before we blur/save them.
+    // Previous stream-frame capture path did not need EXIF because it only saved decoded bitmaps.
+    implementation(libs.androidx.exifinterface)
 
     // YouTube live: Google Sign-In (OAuth token for the YouTube scope) + RootEncoder (RTMP push).
     implementation(libs.play.services.auth)

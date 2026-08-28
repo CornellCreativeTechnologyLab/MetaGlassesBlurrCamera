@@ -23,7 +23,7 @@
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toTopOf="parent" />
 
-        <!-- Top bar -->
+        <!-- Top bar: status and controls stay visible; menu is anchored right -->
         <LinearLayout
             android:id="@+id/top_bar"
             android:layout_width="0dp"
@@ -32,7 +32,7 @@
             android:layout_marginTop="16dp"
             android:gravity="center_vertical"
             android:orientation="horizontal"
-            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintEnd_toStartOf="@id/btn_menu"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toTopOf="parent">
 
@@ -82,6 +82,7 @@
                 android:id="@+id/pill_go_live"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
+                android:layout_marginEnd="8dp"
                 android:background="@drawable/bg_pill"
                 android:gravity="center_vertical"
                 android:orientation="horizontal"
@@ -104,17 +105,21 @@
                     android:textSize="12sp"
                     android:textStyle="bold" />
             </LinearLayout>
-
-            <ImageView
-                android:id="@+id/btn_menu"
-                android:layout_width="36dp"
-                android:layout_height="36dp"
-                android:layout_marginStart="8dp"
-                android:background="@drawable/bg_pill"
-                android:contentDescription="Menu"
-                android:padding="9dp"
-                android:src="@drawable/ic_menu" />
         </LinearLayout>
+
+        <!-- Menu button: always visible at top-right, never pushed off-screen -->
+        <ImageView
+            android:id="@+id/btn_menu"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:layout_marginEnd="12dp"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/bg_pill"
+            android:contentDescription="Menu"
+            android:padding="9dp"
+            android:src="@drawable/ic_menu"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintTop_toTopOf="parent" />
 
         <!-- Recording timer badge -->
         <LinearLayout
@@ -281,14 +286,10 @@
                     android:layout_height="1dp"
                     android:layout_weight="1" />
 
-                <ImageView
-                    android:id="@+id/btn_rotate"
+                <View
                     android:layout_width="56dp"
                     android:layout_height="56dp"
-                    android:background="@drawable/bg_glass_square"
-                    android:contentDescription="Rotate view"
-                    android:padding="15dp"
-                    android:src="@drawable/ic_rotate" />
+                    android:visibility="invisible" />
             </LinearLayout>
         </LinearLayout>
 
@@ -510,6 +511,16 @@
                     android:gravity="center_vertical"
                     android:orientation="horizontal">
 
+                    <ImageView
+                        android:id="@+id/btn_preview_back"
+                        android:layout_width="38dp"
+                        android:layout_height="38dp"
+                        android:layout_marginEnd="12dp"
+                        android:background="@drawable/bg_pill"
+                        android:contentDescription="Back to menu"
+                        android:padding="10dp"
+                        android:src="@drawable/ic_chevron_left" />
+
                     <LinearLayout
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
@@ -713,7 +724,8 @@
                         android:layout_weight="1"
                         android:buttonTint="@color/blurr_accent"
                         android:gravity="center"
-                        android:text="96 px"
+                        android:tag="previous label: 96 px"
+                        android:text="320 px"
                         android:textColor="#FFFFFF" />
 
                     <RadioButton
@@ -722,9 +734,9 @@
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
                         android:buttonTint="@color/blurr_accent"
-                        android:checked="true"
                         android:gravity="center"
-                        android:text="160 px"
+                        android:tag="previous label: 160 px"
+                        android:text="640 px"
                         android:textColor="#FFFFFF" />
 
                     <RadioButton
@@ -733,8 +745,10 @@
                         android:layout_height="wrap_content"
                         android:layout_weight="1"
                         android:buttonTint="@color/blurr_accent"
+                        android:checked="true"
                         android:gravity="center"
-                        android:text="240 px"
+                        android:tag="previous label: 240 px"
+                        android:text="720 px"
                         android:textColor="#FFFFFF" />
                 </RadioGroup>
 
@@ -797,91 +811,272 @@
         </ScrollView>
     </FrameLayout>
 
-    <!-- ===================== HOW-TO SHEET ===================== -->
+    <!-- ===================== HOW-TO SCREEN ===================== -->
     <FrameLayout
         android:id="@+id/howto_scrim"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:background="#B3000000"
+        android:background="#FA070709"
+        android:visibility="gone">
+
+        <ScrollView
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:fillViewport="true">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:paddingHorizontal="22dp"
+                android:paddingTop="18dp"
+                android:paddingBottom="28dp">
+
+                <!-- Header with back button -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <ImageView
+                        android:id="@+id/btn_howto_back"
+                        android:layout_width="38dp"
+                        android:layout_height="38dp"
+                        android:layout_marginEnd="12dp"
+                        android:background="@drawable/bg_pill"
+                        android:contentDescription="Back to menu"
+                        android:padding="10dp"
+                        android:src="@drawable/ic_chevron_left" />
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:letterSpacing="0.18"
+                            android:text="GUIDE"
+                            android:textColor="@color/blurr_accent"
+                            android:textSize="10sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="How To"
+                            android:textColor="#FFFFFF"
+                            android:textSize="22sp"
+                            android:textStyle="bold" />
+                    </LinearLayout>
+                </LinearLayout>
+
+                <!-- Content -->
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="20dp"
+                    android:text="Getting Started"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:text="1. Pair your glasses — turn on your Ray-Ban Meta glasses and tap the shutter button. The app will search for available glasses."
+                    android:textColor="#D9FFFFFF"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:text="2. Everyone is blurred by default — every detected face is blurred on-device. No frame leaves your phone unblurred."
+                    android:textColor="#D9FFFFFF"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="20dp"
+                    android:text="Recording"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:text="Photo: Tap the shutter button to capture one frame with all faces blurred.\n\nVideo: Press and hold the shutter button to record. Release to stop. Audio from your phone's microphone is captured automatically."
+                    android:textColor="#D9FFFFFF"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="20dp"
+                    android:text="Go Live"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:text="Broadcast your blurred POV to YouTube in real-time. Tap 'Go Live' at the top, sign in, and choose a channel. Your glasses camera stream is broadcast blurred."
+                    android:textColor="#D9FFFFFF"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="20dp"
+                    android:text="Gallery &amp; Editing"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:text="Open the Gallery to review photos and videos. Tap 'Select Faces' to toggle blur on/off per person, or 'Blur em all' to keep everyone blurred. Save to export to your camera roll."
+                    android:textColor="#D9FFFFFF"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="20dp"
+                    android:text="Testing Without Glasses"
+                    android:textColor="#FFFFFF"
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:text="Use the phone camera (tap the menu, then 'Test with mock camera') to test the app without glasses. Everything works the same."
+                    android:textColor="#D9FFFFFF"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:id="@+id/btn_howto_close"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="28dp"
+                    android:background="@drawable/bg_pill_accent"
+                    android:gravity="center"
+                    android:paddingVertical="14dp"
+                    android:text="Got it"
+                    android:textColor="#111111"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+        </ScrollView>
+    </FrameLayout>
+
+    <!-- ===================== MOCK CAMERA TEST SCREEN ===================== -->
+    <FrameLayout
+        android:id="@+id/mock_camera_scrim"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#FA070709"
         android:visibility="gone">
 
         <LinearLayout
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_gravity="bottom"
-            android:background="@drawable/bg_card"
-            android:clickable="true"
-            android:focusable="true"
+            android:layout_height="match_parent"
             android:orientation="vertical"
-            android:paddingHorizontal="24dp"
-            android:paddingTop="14dp"
-            android:paddingBottom="26dp">
+            android:paddingHorizontal="22dp"
+            android:paddingTop="18dp"
+            android:paddingBottom="28dp">
 
-            <View
-                android:layout_width="40dp"
-                android:layout_height="4dp"
-                android:layout_gravity="center_horizontal"
-                android:background="@drawable/bg_pill"
-                android:backgroundTint="#33FFFFFF" />
-
-            <TextView
-                android:layout_width="wrap_content"
+            <!-- Header with back button -->
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
-                android:letterSpacing="0.22"
-                android:text="GUIDE"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:layout_marginBottom="18dp">
+
+                <ImageView
+                    android:id="@+id/btn_mock_back"
+                    android:layout_width="38dp"
+                    android:layout_height="38dp"
+                    android:layout_marginEnd="12dp"
+                    android:background="@drawable/bg_pill"
+                    android:contentDescription="Back to menu"
+                    android:padding="10dp"
+                    android:src="@drawable/ic_chevron_left" />
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:letterSpacing="0.18"
+                        android:text="TESTING"
+                        android:textColor="@color/blurr_accent"
+                        android:textSize="10sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:text="Mock Camera"
+                        android:textColor="#FFFFFF"
+                        android:textSize="22sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- Status message -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="@drawable/bg_card"
+                android:padding="16dp"
+                android:text="Use your phone's front camera to test Blurr without glasses. Record photos and videos, blur faces, and export — everything works exactly the same."
+                android:textColor="#CCFFFFFF"
+                android:textSize="13sp" />
+
+            <!-- Content placeholder -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:layout_marginTop="24dp"
+                android:background="@drawable/bg_card"
+                android:gravity="center"
+                android:padding="24dp"
+                android:text="Mock camera mode will launch your phone's front camera.\n\nUse it just like the glasses camera to take photos, record videos, and test the blur pipeline."
                 android:textColor="#80FFFFFF"
-                android:textSize="11sp" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="How To"
-                android:textColor="#FFFFFF"
-                android:textSize="20sp"
-                android:textStyle="bold" />
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="16dp"
-                android:text="1.  Pair your glasses — tap the shutter when it reads PAIR. Make sure your Ray-Ban Meta glasses are powered on and nearby."
-                android:textColor="#D9FFFFFF"
                 android:textSize="13sp" />
 
             <TextView
+                android:id="@+id/btn_mock_start"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:text="2.  Everyone is blurred by default — every detected face is pixelated on-device. No frame leaves your phone unblurred."
-                android:textColor="#D9FFFFFF"
-                android:textSize="13sp" />
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:text="3.  Go Live to broadcast the blurred POV. The badge turns red while On Air."
-                android:textColor="#D9FFFFFF"
-                android:textSize="13sp" />
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:text="4.  Record &amp; review — open the gallery to pick specific people to unblur, or blur em all."
-                android:textColor="#D9FFFFFF"
-                android:textSize="13sp" />
-
-            <TextView
-                android:id="@+id/btn_howto_close"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="20dp"
+                android:layout_marginTop="18dp"
                 android:background="@drawable/bg_pill_accent"
                 android:gravity="center"
                 android:paddingVertical="14dp"
-                android:text="Got it"
+                android:text="Start mock camera"
                 android:textColor="#111111"
                 android:textSize="14sp"
                 android:textStyle="bold" />

@@ -56,8 +56,9 @@ public class CameraWindowActivity extends AppCompatActivity {
     private boolean streaming = false;   // frames are flowing (live preview)
     private boolean recording = false;   // UI recording flag
     private boolean live = false;        // UI "Go Live" broadcast flag
-    private float previewRotation = 0f;
     private VideoRecorder videoRecorder;
+    private VideoRecorder originalVideoRecorder;
+    private long recordingId = -1L;
     private Bitmap lastFrame;   // latest blurred frame, for photo capture
     private boolean connecting = false;   // pairing in progress
     private String pairingStatus = "";    // latest pipeline status while connecting
@@ -142,7 +143,6 @@ public class CameraWindowActivity extends AppCompatActivity {
             @Override
             public void onCameraFrame(Bitmap bitmap) {
                 lastFrame = bitmap; // keep the latest blurred frame for photo capture
-                // Feed the blurred frame to the recorder (off the UI thread, drops until ready).
                 if (recording && videoRecorder != null) {
                     if (!videoRecorder.isReady()) {
                         videoRecorder.start(bitmap.getWidth(), bitmap.getHeight());
@@ -168,6 +168,20 @@ public class CameraWindowActivity extends AppCompatActivity {
             }
 
             @Override
+            public void onOriginalCameraFrame(Bitmap bitmap) {
+                try {
+                    if (recording && originalVideoRecorder != null) {
+                        if (!originalVideoRecorder.isReady()) {
+                            originalVideoRecorder.start(bitmap.getWidth(), bitmap.getHeight());
+                        }
+                        originalVideoRecorder.encode(bitmap);
+                    }
+                } finally {
+                    bitmap.recycle();
+                }
+            }
+
+            @Override
             public void onTranslationOutput(String text) {
             }
 
@@ -186,12 +200,6 @@ public class CameraWindowActivity extends AppCompatActivity {
 
         binding.shutter.setOnClickListener(v -> onShutter());
         binding.shutterInner.setOnClickListener(v -> onShutter());
-        binding.btnRotate.setOnClickListener(v -> {
-            previewRotation = (previewRotation + 90f) % 360f;
-            binding.preview.setRotation(previewRotation);
-            binding.preview.setScaleX(previewRotation % 180f == 0f ? 1f : 1.6f);
-            binding.preview.setScaleY(previewRotation % 180f == 0f ? 1f : 1.6f);
-        });
         binding.btnGallery.setOnClickListener(v ->
                 startActivity(new Intent(this, GalleryReviewActivity.class)));
         binding.pillGoLive.setOnClickListener(v -> toggleLive());
@@ -207,8 +215,10 @@ public class CameraWindowActivity extends AppCompatActivity {
             binding.howtoScrim.setVisibility(View.VISIBLE);
         });
         binding.howtoScrim.setOnClickListener(v -> binding.howtoScrim.setVisibility(View.GONE));
+        binding.btnHowtoBack.setOnClickListener(v -> showMenuFromHowto());
         binding.btnHowtoClose.setOnClickListener(v -> binding.howtoScrim.setVisibility(View.GONE));
         binding.rowPreviewLab.setOnClickListener(v -> openPreviewTestPage());
+        binding.btnPreviewBack.setOnClickListener(v -> showMenuFromPreviewTest());
         binding.btnPreviewClose.setOnClickListener(v -> closePreviewTestPage(true));
         binding.btnPreviewStart.setOnClickListener(v -> startPreviewTest());
         binding.btnPreviewStop.setOnClickListener(v -> stopPreviewTest());
@@ -262,18 +272,28 @@ public class CameraWindowActivity extends AppCompatActivity {
                 seconds = 0;
                 binding.textTimer.setText("00:00");
                 timer.postDelayed(tick, 1000);
-                // Recorder is initialized on the first frame (needs the frame size).
-                videoRecorder = new VideoRecorder(this);
+                // Record both variants with the same id: blurred for the gallery, original as backup.
+                recordingId = System.currentTimeMillis();
+                videoRecorder = new VideoRecorder(this, recordingId, false);
+                originalVideoRecorder = new VideoRecorder(this, recordingId, true);
+                glassesManager.setOriginalFrameDeliveryEnabled(true);
                 // Show the blinking "REC + elapsed time" card on the glasses display.
                 glassesManager.startRecordingIndicator();
             } else if (streaming) {
-                // Grab the next frame with its pristine original + detected faces, so the saved
-                // photo stays non-destructively editable in the gallery.
+                // Quality-first path: ask the glasses for their still-photo capture instead of
+                // saving the next lower-resolution live stream frame.
+                // The high-quality still is still saved with original + detected faces, so the
+                // gallery remains non-destructively editable.
                 Toast.makeText(this, "Capturing…", Toast.LENGTH_SHORT).show();
-                glassesManager.capturePhoto((original, blurred, regions) ->
+                glassesManager.capturePhotoMaxQuality((original, blurred, regions) ->
                         MediaSaver.savePhotoNonDestructive(this, blurred, original, regions,
                                 () -> Toast.makeText(this, "Photo saved to Blurr album",
                                         Toast.LENGTH_SHORT).show()));
+                // Previous stream-frame capture path, kept for rollback:
+                // glassesManager.capturePhoto((original, blurred, regions) ->
+                //         MediaSaver.savePhotoNonDestructive(this, blurred, original, regions,
+                //                 () -> Toast.makeText(this, "Photo saved to Blurr album",
+                //                         Toast.LENGTH_SHORT).show()));
             } else {
                 Toast.makeText(this, "No frame yet — start the stream first", Toast.LENGTH_SHORT).show();
             }
@@ -286,9 +306,14 @@ public class CameraWindowActivity extends AppCompatActivity {
     }
 
     private void stopRecording() {
+        glassesManager.setOriginalFrameDeliveryEnabled(false);
         glassesManager.stopRecordingIndicator();
         final VideoRecorder r = videoRecorder;
+        final VideoRecorder original = originalVideoRecorder;
         videoRecorder = null;
+        originalVideoRecorder = null;
+        recordingId = -1L;
+        if (original != null) original.stop(null);
         if (r == null) return;
         r.stop(() -> Toast.makeText(this, "Saved to Blurr album", Toast.LENGTH_SHORT).show());
     }
@@ -326,21 +351,28 @@ public class CameraWindowActivity extends AppCompatActivity {
     private String[] requiredPermissions() {
         // RECORD_AUDIO is requested here so video recordings can include sound, but it is optional —
         // see hasPermissions(): denying it still lets pairing/streaming proceed (video-only).
+        // Location permission isn't used for location — some OEM Bluetooth stacks (Samsung's
+        // included) still gate full BLE GATT service discovery behind it even when
+        // BLUETOOTH_SCAN/BLUETOOTH_CONNECT are granted, which otherwise silently breaks the DAT
+        // SDK's capability-channel bootstrap (seen as SERVICE_NOT_FOUND for specific channels).
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             return new String[]{
                     Manifest.permission.CAMERA,
                     Manifest.permission.RECORD_AUDIO,
                     Manifest.permission.BLUETOOTH_CONNECT,
                     Manifest.permission.BLUETOOTH_SCAN,
+                    Manifest.permission.ACCESS_FINE_LOCATION,
             };
         }
-        return new String[]{Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO};
+        return new String[]{
+                Manifest.permission.CAMERA,
+                Manifest.permission.RECORD_AUDIO,
+                Manifest.permission.ACCESS_FINE_LOCATION,
+        };
     }
 
     private boolean hasPermissions() {
         for (String permission : requiredPermissions()) {
-            // Microphone is optional — recordings just lose audio without it.
-            if (Manifest.permission.RECORD_AUDIO.equals(permission)) continue;
             if (ContextCompat.checkSelfPermission(this, permission)
                     != PackageManager.PERMISSION_GRANTED) {
                 return false;
@@ -366,6 +398,16 @@ public class CameraWindowActivity extends AppCompatActivity {
             glassesManager.stopDisplayPreviewTest();
         }
         binding.previewTestScrim.setVisibility(View.GONE);
+    }
+
+    private void showMenuFromPreviewTest() {
+        closePreviewTestPage(false);
+        binding.menuScrim.setVisibility(View.VISIBLE);
+    }
+
+    private void showMenuFromHowto() {
+        binding.howtoScrim.setVisibility(View.GONE);
+        binding.menuScrim.setVisibility(View.VISIBLE);
     }
 
     private void startPreviewTest() {
@@ -408,7 +450,8 @@ public class CameraWindowActivity extends AppCompatActivity {
                 useLiveFrames,
                 fps,
                 maxDimension,
-                45,
+                // Previous relay-safe quality was 45; max-quality mode keeps more image detail.
+                95,
                 relayUrl,
                 relayToken
         );
@@ -430,9 +473,13 @@ public class CameraWindowActivity extends AppCompatActivity {
 
     private int selectedPreviewDimension() {
         int checked = binding.previewSizeGroup.getCheckedRadioButtonId();
-        if (checked == R.id.preview_size_96) return 96;
-        if (checked == R.id.preview_size_240) return 240;
-        return 160;
+        // Previous low-bandwidth relay sizes, kept for rollback:
+        // if (checked == R.id.preview_size_96) return 96;
+        // if (checked == R.id.preview_size_240) return 240;
+        // return 160;
+        if (checked == R.id.preview_size_96) return 320;
+        if (checked == R.id.preview_size_240) return 720;
+        return 640;
     }
 
     private void updatePreviewTestStatus(String status) {
@@ -446,11 +493,11 @@ public class CameraWindowActivity extends AppCompatActivity {
     @Override
     public void onBackPressed() {
         if (binding != null && binding.previewTestScrim.getVisibility() == View.VISIBLE) {
-            closePreviewTestPage(true);
+            showMenuFromPreviewTest();
             return;
         }
         if (binding != null && binding.howtoScrim.getVisibility() == View.VISIBLE) {
-            binding.howtoScrim.setVisibility(View.GONE);
+            showMenuFromHowto();
             return;
         }
         if (binding != null && binding.menuScrim.getVisibility() == View.VISIBLE) {
@@ -475,6 +522,7 @@ public class CameraWindowActivity extends AppCompatActivity {
     /** Kicks off YouTube live: sign in if needed, then create the broadcast. */
     private void startLive() {
         startingLive = true;
+        glassesManager.setBlurMode(BlurMode.ALL_FACES);
         setLivePill(true, "Starting…");
         GoogleSignInAccount account = liveController.lastSignedIn();
         if (account != null && account.getAccount() != null) {

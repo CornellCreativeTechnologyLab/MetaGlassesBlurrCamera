@@ -5,7 +5,10 @@ import android.content.Intent;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Color;
 import android.graphics.Rect;
+import android.graphics.drawable.GradientDrawable;
+import android.media.ThumbnailUtils;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -13,11 +16,15 @@ import android.os.Looper;
 import android.provider.BaseColumns;
 import android.provider.MediaStore;
 import android.util.Size;
+import android.view.Gravity;
 import android.view.View;
 import android.widget.FrameLayout;
+import android.widget.GridLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.SeekBar;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.appcompat.app.AlertDialog;
@@ -31,6 +38,7 @@ import com.ctl.metaglasses.R;
 import com.ctl.metaglasses.databinding.ActivityGalleryReviewBinding;
 import com.ctl.metaglasses.recording.MediaSaver;
 import com.ctl.metaglasses.video.VideoBlurProcessor;
+import com.ctl.metaglasses.vision.AgeDisplayFormatter;
 import com.ctl.metaglasses.vision.BlurEditStore;
 import com.ctl.metaglasses.vision.BlurRenderer;
 import com.ctl.metaglasses.vision.FaceMap;
@@ -41,9 +49,8 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -80,8 +87,10 @@ public class GalleryReviewActivity extends AppCompatActivity {
     private final List<MediaItem> items = new ArrayList<>();
 
     // Video face-blur editor (offline transcode).
+    private static final int PEOPLE_GRID_RENDER_BATCH = 8;
     private VideoBlurProcessor videoProcessor;
     private AlertDialog progressDialog;
+    private int peopleGridRenderGeneration = 0;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final Runnable scrubTick = new Runnable() {
@@ -111,7 +120,7 @@ public class GalleryReviewActivity extends AppCompatActivity {
         });
 
         binding.btnBack.setOnClickListener(v -> finish());
-        binding.btnSave.setOnClickListener(v -> saveToPhoneGallery());
+        binding.btnSave.setOnClickListener(v -> confirmExportToPhoneGallery());
         binding.btnShare.setOnClickListener(v -> shareCurrent());
 
         binding.btnPlay.setOnClickListener(v -> togglePlayback());
@@ -149,6 +158,22 @@ public class GalleryReviewActivity extends AppCompatActivity {
                 return;
             }
             for (FaceMap.Face f : editMap.faces) f.blurred = true;
+            selecting = true;
+            onFacesChanged();
+            updateSelecting();
+        });
+        binding.btnUnblurAll.setOnClickListener(v -> {
+            if (selectedItem != null && selectedItem.isVideo) {
+                Toast.makeText(this,
+                        "Videos are processed as new copies. Use Select faces to choose who gets blurred.",
+                        Toast.LENGTH_LONG).show();
+                return;
+            }
+            if (!editable || editMap == null || editMap.faces.isEmpty()) {
+                Toast.makeText(this, "No faces detected in this photo.", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            for (FaceMap.Face f : editMap.faces) f.blurred = false;
             selecting = true;
             onFacesChanged();
             updateSelecting();
@@ -251,6 +276,9 @@ public class GalleryReviewActivity extends AppCompatActivity {
     private void loadGallery() {
         stopPlaybackAndReset();
         items.clear();
+        queryPrivateInto(MediaSaver.appPhotoDir(this), false);
+        queryPrivateInto(MediaSaver.appVideoDir(this), true);
+        // Keep older MediaStore captures visible; new captures are app-private.
         queryInto(MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
                 MediaStore.Images.Media.RELATIVE_PATH, MediaSaver.PHOTO_PATH, false);
         queryInto(MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
@@ -293,6 +321,7 @@ public class GalleryReviewActivity extends AppCompatActivity {
         binding.previewImage.setVisibility(View.VISIBLE);
         binding.previewVideo.setVisibility(View.GONE);
         binding.scrubberRow.setVisibility(item.isVideo ? View.VISIBLE : View.GONE);
+        binding.btnUnblurAll.setVisibility(item.isVideo ? View.GONE : View.VISIBLE);
         binding.videoSeek.setProgress(0);
         binding.timeCurrent.setText(formatTime(0));
         binding.timeDuration.setText(formatTime(0));
@@ -579,8 +608,20 @@ public class GalleryReviewActivity extends AppCompatActivity {
 
     // ---------------------------------------------------------------- save / share
 
-    /** Saves the current item into the phone camera roll (DCIM/Blurr). */
-    private void saveToPhoneGallery() {
+    private void confirmExportToPhoneGallery() {
+        MediaItem item = selectedItem;
+        if (item == null) return;
+
+        new AlertDialog.Builder(this)
+                .setTitle("Export to phone gallery?")
+                .setMessage("This will copy the current capture to DCIM/Blurr so it appears outside Blurr.")
+                .setPositiveButton("Export", (dialog, which) -> exportToPhoneGallery())
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    /** Exports the current item into the phone camera roll (DCIM/Blurr). */
+    private void exportToPhoneGallery() {
         MediaItem item = selectedItem;
         if (item == null) return;
 
@@ -588,12 +629,12 @@ public class GalleryReviewActivity extends AppCompatActivity {
             Bitmap rendered = BlurRenderer.render(editOriginal, editMap);
             MediaSaver.saveBitmapToDcim(this, rendered, () -> {
                 rendered.recycle();
-                Toast.makeText(this, "Saved to Photos (DCIM/Blurr)", Toast.LENGTH_SHORT).show();
+                Toast.makeText(this, "Exported to Photos (DCIM/Blurr)", Toast.LENGTH_SHORT).show();
             });
         } else {
             MediaSaver.copyToDcim(this, item.uri, item.isVideo, ok ->
                     Toast.makeText(this,
-                            ok ? "Saved to Photos (DCIM/Blurr)" : "Could not save to Photos",
+                            ok ? "Exported to Photos (DCIM/Blurr)" : "Could not export to Photos",
                             Toast.LENGTH_SHORT).show());
         }
     }
@@ -622,8 +663,15 @@ public class GalleryReviewActivity extends AppCompatActivity {
                 }
             });
         } else {
-            launchShare(item.uri, item.isVideo ? "video/mp4" : "image/jpeg");
+            launchShare(shareableUri(item.uri), item.isVideo ? "video/mp4" : "image/jpeg");
         }
+    }
+
+    private Uri shareableUri(Uri uri) {
+        if (!"file".equalsIgnoreCase(uri.getScheme())) return uri;
+        String path = uri.getPath();
+        if (path == null) return uri;
+        return FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", new File(path));
     }
 
     private void launchShare(Uri uri, String mime) {
@@ -636,10 +684,17 @@ public class GalleryReviewActivity extends AppCompatActivity {
 
     // ---------------------------------------------------------- video blur
 
+    private Uri editableVideoUri(MediaItem item) {
+        if (item == null || !item.isVideo) return item == null ? null : item.uri;
+        if (item.editId < 0) return item.uri;
+        File original = MediaSaver.appOriginalVideoFile(this, item.editId);
+        return original.exists() ? Uri.fromFile(original) : item.uri;
+    }
+
     /** Scans the selected video for distinct people, then lets the user pick who to blur. */
     private void startVideoBlur() {
         if (selectedItem == null || !selectedItem.isVideo) return;
-        final Uri uri = selectedItem.uri;
+        final Uri uri = editableVideoUri(selectedItem);
         progressDialog = showProgress("Scanning video for people…");
         videoProcessor.scan(uri, new VideoBlurProcessor.ScanCallback() {
             @Override
@@ -667,39 +722,368 @@ public class GalleryReviewActivity extends AppCompatActivity {
                     .setTitle("No distinct people detected")
                     .setMessage("Blur every face in this video anyway?")
                     .setPositiveButton("Blur all", (d, w) -> applyVideoBlur(uri, Collections.emptySet()))
+                    .setNeutralButton("Privacy blur", (d, w) -> applyPrivacyVideoBlur(uri))
                     .setNegativeButton("Cancel", null)
                     .show();
             return;
         }
-        final boolean[] checked = new boolean[people.size()];
-        Arrays.fill(checked, true);
-        final String[] labels = new String[people.size()];
-        for (int i = 0; i < people.size(); i++) labels[i] = "Person " + (i + 1);
-        new AlertDialog.Builder(this)
-                .setTitle("Who to blur (" + people.size() + " found)")
-                .setMultiChoiceItems(labels, checked, (d, which, isChecked) -> checked[which] = isChecked)
-                .setPositiveButton("Blur", (d, w) -> {
-                    Set<Integer> ids = new HashSet<>();
-                    for (int i = 0; i < people.size(); i++) {
-                        if (checked[i]) ids.add(people.get(i).trackingId);
-                    }
-                    if (ids.isEmpty()) {
-                        Toast.makeText(this, "No one selected.", Toast.LENGTH_SHORT).show();
-                        return;
-                    }
-                    applyVideoBlur(uri, ids);
-                })
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(dp(20), dp(12), dp(20), 0);
+
+        TextView summary = new TextView(this);
+        summary.setTextColor(Color.rgb(40, 40, 40));
+        summary.setTextSize(13);
+        root.addView(summary, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        LinearLayout quickActions = new LinearLayout(this);
+        quickActions.setOrientation(LinearLayout.HORIZONTAL);
+        quickActions.setGravity(Gravity.CENTER_VERTICAL);
+        quickActions.setPadding(0, dp(8), 0, dp(8));
+        root.addView(quickActions, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        ScrollView scroll = new ScrollView(this);
+        GridLayout grid = new GridLayout(this);
+        grid.setColumnCount(2);
+        grid.setUseDefaultMargins(false);
+        scroll.addView(grid, new ScrollView.LayoutParams(
+                ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT));
+        root.addView(scroll, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(420)));
+
+        final List<List<PersonChoice>> holder = new ArrayList<>();
+        summary.setText("Preparing face cards...");
+
+        addSelectionAction(quickActions, "Suggested", () -> {
+            if (holder.isEmpty()) return;
+            selectSuggestedChoices(holder.get(0));
+            renderPeopleGrid(grid, holder.get(0), summary);
+        });
+        addSelectionAction(quickActions, "All", () -> {
+            if (holder.isEmpty()) return;
+            setAllChoices(holder.get(0), true);
+            renderPeopleGrid(grid, holder.get(0), summary);
+        });
+        addSelectionAction(quickActions, "Unblur all", () -> {
+            if (holder.isEmpty()) return;
+            setAllChoices(holder.get(0), false);
+            renderPeopleGrid(grid, holder.get(0), summary);
+        });
+        addSelectionAction(quickActions, "Invert", () -> {
+            if (holder.isEmpty()) return;
+            invertChoices(holder.get(0));
+            renderPeopleGrid(grid, holder.get(0), summary);
+        });
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Who to blur")
+                .setView(root)
+                .setPositiveButton("Apply selection", null)
+                .setNeutralButton("Privacy blur", null)
                 .setNegativeButton("Cancel", null)
-                .show();
+                .create();
+        dialog.setOnShowListener(d -> {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(false);
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+                if (holder.isEmpty()) return;
+                Set<Integer> ids = selectedPersonIds(holder.get(0));
+                dialog.dismiss();
+                applyVideoBlur(uri, ids.isEmpty() ? noTracksSelected() : ids);
+            });
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
+                dialog.dismiss();
+                applyPrivacyVideoBlur(uri);
+            });
+        });
+        dialog.show();
+
+        io.execute(() -> {
+            List<PersonChoice> choices = buildPersonChoices(people, true, null);
+            ui.post(() -> {
+                if (!dialog.isShowing()) return;
+                holder.clear();
+                holder.add(choices);
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(true);
+                renderPeopleGrid(grid, choices, summary);
+            });
+        });
+    }
+
+    private void renderPeopleGrid(GridLayout grid, List<PersonChoice> choices, TextView summary) {
+        int generation = ++peopleGridRenderGeneration;
+        grid.removeAllViews();
+        grid.setColumnCount(2);
+        updatePeopleSummary(summary, choices, 0);
+        renderPeopleGridBatch(grid, choices, summary, generation, 0);
+    }
+
+    private void renderPeopleGridBatch(
+            GridLayout grid,
+            List<PersonChoice> choices,
+            TextView summary,
+            int generation,
+            int start
+    ) {
+        if (generation != peopleGridRenderGeneration || binding == null) return;
+        int end = Math.min(choices.size(), start + PEOPLE_GRID_RENDER_BATCH);
+        for (int i = start; i < end; i++) {
+            PersonChoice choice = choices.get(i);
+            FrameLayout card = personChoiceCard(choice, i + 1, () ->
+                    renderPeopleGrid(grid, choices, summary));
+            GridLayout.LayoutParams lp = new GridLayout.LayoutParams();
+            lp.width = 0;
+            lp.height = LinearLayout.LayoutParams.WRAP_CONTENT;
+            lp.columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f);
+            lp.setMargins(dp(4), dp(4), dp(4), dp(8));
+            card.setLayoutParams(lp);
+            grid.addView(card);
+        }
+        updatePeopleSummary(summary, choices, end);
+        if (end < choices.size()) {
+            ui.post(() -> renderPeopleGridBatch(grid, choices, summary, generation, end));
+        }
+    }
+
+    private void updatePeopleSummary(TextView summary, List<PersonChoice> choices, int rendered) {
+        int selected = 0;
+        int suggested = 0;
+        int repeated = 0;
+        for (PersonChoice choice : choices) {
+            if (choice.selected) selected++;
+            if (choice.privacySuggested) suggested++;
+            repeated += Math.max(0, choice.people.size() - 1);
+        }
+        String suffix = repeated > 0 ? " - " + repeated + " repeated entries grouped" : "";
+        String loading = rendered < choices.size() ? " - loading " + rendered + "/" + choices.size() : "";
+        summary.setText(selected + " selected - " + suggested + " privacy suggested - "
+                + choices.size() + " face cards" + suffix + loading);
+    }
+
+    private FrameLayout personChoiceCard(PersonChoice choice, int index, Runnable onChanged) {
+        FrameLayout card = new FrameLayout(this);
+        card.setPadding(dp(6), dp(6), dp(6), dp(6));
+        card.setBackground(faceChoiceBackground(choice.selected));
+        card.setOnClickListener(v -> {
+            choice.selected = !choice.selected;
+            onChanged.run();
+        });
+
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setGravity(Gravity.CENTER_HORIZONTAL);
+        card.addView(content, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT));
+
+        ImageView face = new ImageView(this);
+        face.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        face.setImageBitmap(choice.people.get(0).thumbnail);
+        content.addView(face, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(126)));
+
+        TextView label = new TextView(this);
+        label.setGravity(Gravity.CENTER);
+        label.setTextColor(choice.selected ? Color.BLACK : Color.WHITE);
+        label.setTextSize(13);
+        label.setText(choice.people.size() > 1
+                ? "Person " + index + " (" + choice.people.size() + " matches)"
+                : "Person " + index);
+        label.setPadding(0, dp(8), 0, dp(2));
+        content.addView(label, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        TextView suggestion = new TextView(this);
+        suggestion.setGravity(Gravity.CENTER);
+        suggestion.setText(choice.privacySuggested ? "PRIVACY SUGGESTED" : "MANUAL REVIEW");
+        suggestion.setTextColor(choice.selected ? Color.rgb(35, 35, 35) : Color.rgb(210, 210, 210));
+        suggestion.setTextSize(10);
+        suggestion.setTypeface(null, android.graphics.Typeface.BOLD);
+        suggestion.setPadding(0, 0, 0, dp(4));
+        content.addView(suggestion, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        TextView modelNote = new TextView(this);
+        modelNote.setGravity(Gravity.CENTER);
+        modelNote.setText(ageNoteForChoice(choice));
+        modelNote.setTextColor(choice.selected ? Color.rgb(35, 35, 35) : Color.rgb(210, 210, 210));
+        modelNote.setTextSize(10);
+        modelNote.setPadding(dp(4), 0, dp(4), dp(6));
+        content.addView(modelNote, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        TextView badge = new TextView(this);
+        badge.setText(choice.selected ? "BLUR" : "KEEP");
+        badge.setTextColor(choice.selected ? Color.BLACK : Color.WHITE);
+        badge.setTextSize(11);
+        badge.setTypeface(null, android.graphics.Typeface.BOLD);
+        badge.setGravity(Gravity.CENTER);
+        badge.setPadding(dp(9), dp(4), dp(9), dp(4));
+        badge.setBackground(faceBadgeBackground(choice.selected));
+        FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT);
+        blp.gravity = Gravity.TOP | Gravity.END;
+        blp.setMargins(0, dp(10), dp(10), 0);
+        card.addView(badge, blp);
+
+        return card;
+    }
+
+    private List<PersonChoice> buildPersonChoices(
+            List<VideoBlurProcessor.Person> people,
+            boolean mergeSimilar,
+            Set<Integer> selectedIds
+    ) {
+        List<PersonChoice> choices = new ArrayList<>();
+        for (VideoBlurProcessor.Person person : people) {
+            long hash = averageFaceHash(person.thumbnail);
+            PersonChoice target = null;
+            if (mergeSimilar) {
+                for (PersonChoice choice : choices) {
+                    if (Long.bitCount(choice.hash ^ hash) <= 10) {
+                        target = choice;
+                        break;
+                    }
+                }
+            }
+            if (target == null) {
+                target = new PersonChoice(hash);
+                choices.add(target);
+            }
+            target.people.add(person);
+            target.privacySuggested = target.privacySuggested || person.privacyBlur;
+        }
+        for (PersonChoice choice : choices) {
+            choice.selected = selectedIds == null ? choice.privacySuggested : containsAny(choice, selectedIds);
+        }
+        return choices;
+    }
+
+    private String ageNoteForChoice(PersonChoice choice) {
+        float weightedPMinor = 0f;
+        float pMinorWeight = 0f;
+        Float displayAge = null;
+        for (VideoBlurProcessor.Person person : choice.people) {
+            float confidence = estimateConfidence(person);
+            weightedPMinor += person.pMinor * confidence;
+            pMinorWeight += confidence;
+            if (person.estimatedAge != null && !person.estimatedAge.isNaN()) {
+                displayAge = displayAge == null
+                        ? person.estimatedAge
+                        : Math.max(displayAge, person.estimatedAge);
+            }
+        }
+
+        float pMinor = pMinorWeight > 0f ? weightedPMinor / pMinorWeight : 1f;
+        return AgeDisplayFormatter.format(displayAge, pMinor);
+    }
+
+    private float estimateConfidence(VideoBlurProcessor.Person person) {
+        if (person.estimatedAge != null && !person.estimatedAge.isNaN()) {
+            return Math.max(0.20f, Math.min(1f, Math.abs(person.estimatedAge - 18f) / 7f));
+        }
+        return Math.max(0.20f, Math.min(1f, Math.abs(person.pMinor - 0.5f) * 2f));
+    }
+
+    private void addSelectionAction(LinearLayout row, String label, Runnable action) {
+        TextView button = new TextView(this);
+        button.setText(label);
+        button.setGravity(Gravity.CENTER);
+        button.setTextColor(Color.rgb(20, 20, 20));
+        button.setTextSize(12);
+        button.setTypeface(null, android.graphics.Typeface.BOLD);
+        button.setPadding(dp(8), dp(8), dp(8), dp(8));
+        button.setBackground(faceBadgeBackground(true));
+        button.setOnClickListener(v -> action.run());
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        lp.setMargins(dp(3), 0, dp(3), 0);
+        row.addView(button, lp);
+    }
+
+    private void setAllChoices(List<PersonChoice> choices, boolean selected) {
+        for (PersonChoice choice : choices) choice.selected = selected;
+    }
+
+    private void selectSuggestedChoices(List<PersonChoice> choices) {
+        for (PersonChoice choice : choices) choice.selected = choice.privacySuggested;
+    }
+
+    private void invertChoices(List<PersonChoice> choices) {
+        for (PersonChoice choice : choices) choice.selected = !choice.selected;
+    }
+
+    private boolean containsAny(PersonChoice choice, Set<Integer> ids) {
+        for (VideoBlurProcessor.Person person : choice.people) {
+            if (ids.contains(person.trackingId)) return true;
+        }
+        return false;
+    }
+
+    private Set<Integer> selectedPersonIds(List<PersonChoice> choices) {
+        Set<Integer> ids = new LinkedHashSet<>();
+        for (PersonChoice choice : choices) {
+            if (!choice.selected) continue;
+            for (VideoBlurProcessor.Person person : choice.people) {
+                ids.add(person.trackingId);
+            }
+        }
+        return ids;
+    }
+
+    private Set<Integer> noTracksSelected() {
+        Set<Integer> ids = new LinkedHashSet<>();
+        ids.add(VideoBlurProcessor.NO_TRACKS_SELECTED);
+        return ids;
+    }
+
+    private long averageFaceHash(Bitmap bitmap) {
+        if (bitmap == null || bitmap.isRecycled()) return 0L;
+        Bitmap tiny = Bitmap.createScaledBitmap(bitmap, 8, 8, true);
+        int[] pixels = new int[64];
+        tiny.getPixels(pixels, 0, 8, 0, 0, 8, 8);
+        if (tiny != bitmap) tiny.recycle();
+        int[] luma = new int[64];
+        int sum = 0;
+        for (int i = 0; i < pixels.length; i++) {
+            int c = pixels[i];
+            int y = (((c >> 16) & 0xFF) * 299 + ((c >> 8) & 0xFF) * 587 + (c & 0xFF) * 114) / 1000;
+            luma[i] = y;
+            sum += y;
+        }
+        int avg = sum / luma.length;
+        long hash = 0L;
+        for (int i = 0; i < luma.length; i++) {
+            if (luma[i] >= avg) hash |= (1L << i);
+        }
+        return hash;
+    }
+
+    private GradientDrawable faceChoiceBackground(boolean selected) {
+        GradientDrawable bg = new GradientDrawable();
+        bg.setShape(GradientDrawable.RECTANGLE);
+        bg.setCornerRadius(dp(8));
+        bg.setColor(selected ? getColor(R.color.blurr_accent) : Color.rgb(24, 24, 27));
+        bg.setStroke(dp(1), selected ? Color.TRANSPARENT : getColor(R.color.blurr_stroke));
+        return bg;
+    }
+
+    private GradientDrawable faceBadgeBackground(boolean selected) {
+        GradientDrawable bg = new GradientDrawable();
+        bg.setShape(GradientDrawable.RECTANGLE);
+        bg.setCornerRadius(dp(100));
+        bg.setColor(selected ? Color.WHITE : Color.argb(190, 0, 0, 0));
+        return bg;
     }
 
     private void confirmBlurAllVideo() {
         if (selectedItem == null || !selectedItem.isVideo) return;
-        final Uri uri = selectedItem.uri;
+        final Uri uri = editableVideoUri(selectedItem);
         new AlertDialog.Builder(this)
                 .setTitle("Blur all faces")
                 .setMessage("Process this video and blur every detected face? This can take a while.")
                 .setPositiveButton("Blur all", (d, w) -> applyVideoBlur(uri, Collections.emptySet()))
+                .setNeutralButton("Privacy blur", (d, w) -> applyPrivacyVideoBlur(uri))
                 .setNegativeButton("Cancel", null)
                 .show();
     }
@@ -717,7 +1101,32 @@ public class GalleryReviewActivity extends AppCompatActivity {
             public void onComplete(Uri outputUri) {
                 dismissProgress();
                 Toast.makeText(GalleryReviewActivity.this,
-                        "Saved blurred video to Photos (DCIM/Blurr)", Toast.LENGTH_LONG).show();
+                        "Saved blurred video to Blurr gallery", Toast.LENGTH_LONG).show();
+                loadGallery();
+            }
+
+            @Override
+            public void onError(String message) {
+                dismissProgress();
+                Toast.makeText(GalleryReviewActivity.this, message, Toast.LENGTH_LONG).show();
+            }
+        });
+    }
+
+    /** Transcodes the video with fail-closed minor/unknown privacy blur. */
+    private void applyPrivacyVideoBlur(Uri uri) {
+        progressDialog = showProgress("Privacy blurring videoâ€¦ this can take a while");
+        videoProcessor.applyPrivacy(uri, new VideoBlurProcessor.ApplyCallback() {
+            @Override
+            public void onProgress(float f) {
+                setProgressMessage("Privacy blurringâ€¦ " + Math.round(f * 100) + "%");
+            }
+
+            @Override
+            public void onComplete(Uri outputUri) {
+                dismissProgress();
+                Toast.makeText(GalleryReviewActivity.this,
+                        "Saved privacy-blurred video to Blurr gallery", Toast.LENGTH_LONG).show();
                 loadGallery();
             }
 
@@ -754,13 +1163,51 @@ public class GalleryReviewActivity extends AppCompatActivity {
     private void loadThumb(Uri uri, Size size, ImageView target) {
         io.execute(() -> {
             try {
-                Bitmap bmp = getContentResolver().loadThumbnail(uri, size, null);
+                Bitmap bmp;
+                if ("file".equalsIgnoreCase(uri.getScheme())) {
+                    String path = uri.getPath();
+                    if (path == null) return;
+                    File file = new File(path);
+                    if (file.getName().toLowerCase(Locale.US).endsWith(".mp4")) {
+                        bmp = ThumbnailUtils.createVideoThumbnail(file, size, null);
+                    } else {
+                        bmp = decodeFileThumbnail(file, Math.max(size.getWidth(), size.getHeight()));
+                    }
+                } else {
+                    bmp = getContentResolver().loadThumbnail(uri, size, null);
+                }
+                if (bmp == null) return;
                 runOnUiThread(() -> {
                     if (binding != null) target.setImageBitmap(bmp);
                 });
             } catch (Exception ignored) {
             }
         });
+    }
+
+    private Bitmap decodeFileThumbnail(File file, int maxDim) {
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeFile(file.getAbsolutePath(), bounds);
+        int sample = 1;
+        int larger = Math.max(bounds.outWidth, bounds.outHeight);
+        while (larger / sample > maxDim) sample *= 2;
+        BitmapFactory.Options opts = new BitmapFactory.Options();
+        opts.inSampleSize = sample;
+        opts.inPreferredConfig = Bitmap.Config.ARGB_8888;
+        return BitmapFactory.decodeFile(file.getAbsolutePath(), opts);
+    }
+
+    private void queryPrivateInto(File dir, boolean isVideo) {
+        File[] files = dir.listFiles((d, name) -> {
+            String lower = name.toLowerCase(Locale.US);
+            return isVideo ? lower.endsWith(".mp4") : lower.endsWith(".jpg") || lower.endsWith(".jpeg");
+        });
+        if (files == null) return;
+        for (File file : files) {
+            long editId = MediaSaver.idFromDisplayName(file.getName());
+            items.add(new MediaItem(Uri.fromFile(file), isVideo, file.lastModified(), editId));
+        }
     }
 
     private void queryInto(Uri collection, String pathColumn, String relPath, boolean isVideo) {
@@ -800,6 +1247,17 @@ public class GalleryReviewActivity extends AppCompatActivity {
             this.isVideo = isVideo;
             this.dateAdded = dateAdded;
             this.editId = editId;
+        }
+    }
+
+    private static class PersonChoice {
+        final long hash;
+        final List<VideoBlurProcessor.Person> people = new ArrayList<>();
+        boolean privacySuggested = false;
+        boolean selected = true;
+
+        PersonChoice(long hash) {
+            this.hash = hash;
         }
     }
 

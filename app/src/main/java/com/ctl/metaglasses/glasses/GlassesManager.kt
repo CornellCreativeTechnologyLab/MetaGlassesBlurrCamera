@@ -3,6 +3,8 @@ package com.ctl.metaglasses.glasses
 import android.app.Activity
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
 import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
@@ -10,10 +12,13 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.activity.result.ActivityResultCaller
 import androidx.activity.result.ActivityResultLauncher
+import androidx.exifinterface.media.ExifInterface
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.lifecycleScope
+import com.meta.wearable.dat.camera.Camera
 import com.meta.wearable.dat.camera.Stream
-import com.meta.wearable.dat.camera.addStream
+import com.meta.wearable.dat.camera.addCamera
+import com.meta.wearable.dat.camera.types.PhotoData
 import com.meta.wearable.dat.camera.types.StreamConfiguration
 import com.meta.wearable.dat.camera.types.StreamError
 import com.meta.wearable.dat.camera.types.VideoFrame
@@ -41,16 +46,15 @@ import com.meta.wearable.dat.mockdevice.MockDeviceKit
 import com.meta.wearable.dat.mockdevice.api.GlassesModel
 import com.meta.wearable.dat.mockdevice.api.camera.CameraFacing
 import com.ctl.metaglasses.vision.BlurMode
-import com.ctl.metaglasses.vision.EnsembleAgeClassifier
 import com.ctl.metaglasses.vision.FaceBlurProcessor
 import com.ctl.metaglasses.vision.FaceRegion
-import com.ctl.metaglasses.vision.OnnxAgeClassifier
 import com.ctl.metaglasses.vision.TFLiteAgeClassifier
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
@@ -76,6 +80,12 @@ class GlassesManager(private val appContext: Context) {
         // reused on skipped frames. Higher = cheaper but blur lags faster-moving faces.
         private const val DETECT_EVERY_N_FRAMES = 2L
 
+        private const val STREAM_START_TIMEOUT_MS = 10_000L
+
+        private const val QUALITY_FIRST_STREAM_FPS = 7
+        private const val QUALITY_FIRST_PREVIEW_MAX_DIMENSION = 1280
+        private const val QUALITY_FIRST_PREVIEW_JPEG_QUALITY = 95
+
         // Stable HTTPS images from Meta's own DisplayAccess sample. These are used as a
         // control path: if these can be pushed repeatedly but live data URIs cannot, the
         // bottleneck is the public image transport rather than Display refresh itself.
@@ -88,7 +98,7 @@ class GlassesManager(private val appContext: Context) {
         )
     }
 
-    /** Delivered on the main thread when [capturePhoto] grabs the next processed frame. */
+    /** Delivered on the main thread when a still capture has its original, blurred copy, and face map. */
     interface PhotoCaptureCallback {
         fun onPhoto(original: Bitmap, blurred: Bitmap, regions: Array<FaceRegion>)
     }
@@ -98,6 +108,8 @@ class GlassesManager(private val appContext: Context) {
         fun onFrameReceived(frameBytes: ByteArray, width: Int, height: Int, timestampMillis: Long)
         /** A decoded camera frame from the glasses, ready to show on the phone. */
         fun onCameraFrame(bitmap: Bitmap)
+        /** A pristine frame before live blur is applied. Delivered only when explicitly enabled. */
+        fun onOriginalCameraFrame(bitmap: Bitmap)
         fun onTranslationOutput(text: String)
         fun onError(message: String, throwable: Throwable?)
     }
@@ -108,6 +120,7 @@ class GlassesManager(private val appContext: Context) {
     private var lifecycleOwner: LifecycleOwner? = null
     private var deviceSession: DeviceSession? = null
     private var display: Display? = null
+    private var camera: Camera? = null
     private var stream: Stream? = null
     private var cameraPermissionLauncher: ActivityResultLauncher<Permission>? = null
     // Selects the first available glasses. Reused for both device-availability waiting
@@ -120,6 +133,7 @@ class GlassesManager(private val appContext: Context) {
     private var videoJob: Job? = null
     private var streamStateJob: Job? = null
     private var streamErrorJob: Job? = null
+    private var streamWatchdogJob: Job? = null
     private var displayPreviewTestJob: Job? = null
     private var recordingIndicatorJob: Job? = null
     // Set while a recording is in progress so the glasses "REC" card can (re)start as soon as
@@ -145,22 +159,32 @@ class GlassesManager(private val appContext: Context) {
     @Volatile private var latestPreviewFrame: Bitmap? = null
     @Volatile private var pendingPhotoCapture: PhotoCaptureCallback? = null
 
+    // Diagnostics for the "stream says STREAMING but the preview stays blank" case: distinguishes
+    // "no frame ever arrived from the SDK" from "frames arrive but never survive conversion".
+    @Volatile private var framesReceived = 0L
+    @Volatile private var framesDelivered = 0L
+    @Volatile private var frameConversionFailures = 0L
+
     // Face-detection throttling: detect every Nth frame and reuse the faces in between (the blur
     // itself still runs every frame). Keeps faces covered as they move while saving detection cost.
     private var frameIndex = 0L
     @Volatile private var cachedFaceRegions: List<FaceRegion> = emptyList()
+    @Volatile private var deliverOriginalFrames = false
 
     // Real-time face blurring applied to camera frames before they reach the UI. The minor check is
-    // an ensemble vote between the TFLite age-regression model and the ONNX logistic-regression model.
+    // a privacy-first V2 verdict. Current asset support accepts the legacy age regressor and a future
+    // ordinal bucket TFLite model with the same runtime wrapper.
     private val faceBlurProcessor by lazy {
-        FaceBlurProcessor(
-            EnsembleAgeClassifier(
-                listOf(
-                    TFLiteAgeClassifier(appContext),
-                    OnnxAgeClassifier(appContext),
-                )
-            )
-        )
+        FaceBlurProcessor(TFLiteAgeClassifier(appContext))
+        // Previous rollback ensemble:
+        // FaceBlurProcessor(
+        //     EnsembleAgeClassifier(
+        //         listOf(
+        //             TFLiteAgeClassifier(appContext),
+        //             OnnxAgeClassifier(appContext),
+        //         )
+        //     )
+        // )
     }
     @Volatile private var blurMode = BlurMode.OFF
 
@@ -168,9 +192,14 @@ class GlassesManager(private val appContext: Context) {
     fun setBlurMode(mode: BlurMode) {
         blurMode = mode
         cachedFaceRegions = emptyList() // re-detect fresh under the new mode
+        faceBlurProcessor.resetTracking()
     }
 
     fun getBlurMode(): BlurMode = blurMode
+
+    fun setOriginalFrameDeliveryEnabled(enabled: Boolean) {
+        deliverOriginalFrames = enabled
+    }
 
     /** True once a fine-tuned age model (assets/age_classifier.tflite) is loaded. */
     fun isAgeModelLoaded(): Boolean = faceBlurProcessor.ageModelLoaded
@@ -344,7 +373,8 @@ class GlassesManager(private val appContext: Context) {
                                 sessionStarted = false
                                 displayReady = false
                                 sessionRequested = false
-                                stream?.stop()
+                                camera?.close()
+                                camera = null
                                 stream = null
                                 deviceSession = null
                                 pendingSessionDeviceId = null
@@ -511,13 +541,17 @@ class GlassesManager(private val appContext: Context) {
     fun stopVideoStream() {
         streamRequested = false
         streaming = false
+        deliverOriginalFrames = false
         cachedFaceRegions = emptyList()
+        faceBlurProcessor.resetTracking()
 
         videoJob?.cancel(); videoJob = null
         streamStateJob?.cancel(); streamStateJob = null
         streamErrorJob?.cancel(); streamErrorJob = null
+        streamWatchdogJob?.cancel(); streamWatchdogJob = null
 
-        stream?.stop()
+        camera?.close()
+        camera = null
         stream = null
 
         postStatus("Camera stream stopped.")
@@ -526,14 +560,20 @@ class GlassesManager(private val appContext: Context) {
     private fun attachStream(session: DeviceSession) {
         val owner = lifecycleOwner ?: return
 
-        // Quality over smoothness: HIGH is the glasses' top resolution (720x1280 vs MEDIUM's
-        // 504x896), and a lower frame rate gives each frame more Bluetooth bandwidth, so every
-        // frame is compressed less and looks sharper/less grainy in both preview and captures.
-        // Valid frame rates are 2/7/15/24/30; 15 keeps motion reasonable while maximizing per-frame
-        // quality. Drop to 7 if HIGH@15 can't hold a steady stream over your link.
-        session.addStream(
-            StreamConfiguration(videoQuality = VideoQuality.HIGH, frameRate = 15),
-        ).onSuccess { newStream ->
+        // Fresh diagnostics per stream attempt, so the watchdog reports this attempt's numbers.
+        framesReceived = 0L
+        framesDelivered = 0L
+        frameConversionFailures = 0L
+
+        // Quality-first stream: HIGH is the glasses' top live resolution (720x1280 vs MEDIUM's
+        // 504x896). Lower FPS gives each frame more bandwidth over the glasses link.
+        // Previous balanced setting, kept for rollback:
+        // StreamConfiguration(videoQuality = VideoQuality.HIGH, frameRate = 15)
+        session.addCamera(
+            StreamConfiguration(videoQuality = VideoQuality.HIGH, frameRate = QUALITY_FIRST_STREAM_FPS),
+        ).onSuccess { addedCamera ->
+            camera = addedCamera
+            val newStream = addedCamera.stream
             stream = newStream
             postStatus("Camera stream starting...")
 
@@ -564,6 +604,35 @@ class GlassesManager(private val appContext: Context) {
                 streaming = false
                 postError("Failed to start camera stream: ${error.description}", null)
             }
+
+            // The DAT stream can report success while its underlying data channel never actually
+            // bootstraps (seen as repeated SERVICE_NOT_FOUND retries in logcat when Developer Mode
+            // isn't enabled for this device in the Meta AI app) — no frame ever arrives and the UI
+            // silently sits in "connecting" forever. Surface that instead of hanging.
+            // The watchdog is cancelled by handleVideoFrame as soon as one frame survives
+            // conversion. Reaching the end of this delay therefore means no usable frame arrived.
+            streamWatchdogJob?.cancel()
+            streamWatchdogJob = owner.lifecycleScope.launch {
+                delay(STREAM_START_TIMEOUT_MS)
+                Log.e(
+                    TAG,
+                    "Stream stalled after ${STREAM_START_TIMEOUT_MS}ms: " +
+                        "received=$framesReceived converted-failures=$frameConversionFailures " +
+                        "delivered=$framesDelivered",
+                )
+                postError(
+                    if (framesReceived > 0L) {
+                        "Camera frames are arriving but cannot be decoded ($frameConversionFailures " +
+                            "conversion failures). This is a frame-format mismatch, not a pairing problem."
+                    } else {
+                        "Camera stream isn't sending frames. If the glasses camera light is on but " +
+                            "nothing appears, enable Developer Mode for this device in the Meta AI app " +
+                            "(App connections / Developer mode apps) and reconnect."
+                    },
+                    null,
+                )
+                stopVideoStream()
+            }
         }.onFailure { error, _ ->
             streamRequested = false
             streaming = false
@@ -575,12 +644,109 @@ class GlassesManager(private val appContext: Context) {
      * Requests a still: the next processed frame is delivered to [callback] as the pristine original,
      * the blurred version, and the detected face boxes — enough to store a non-destructive capture.
      */
+    // Previous stream-frame photo capture path, kept for rollback.
     fun capturePhoto(callback: PhotoCaptureCallback) {
         pendingPhotoCapture = callback
     }
 
+    /**
+     * Captures the highest-quality still image DAT exposes, then runs the same face-map/blur path
+     * used by frame captures so saved photos remain non-destructively editable.
+     */
+    fun capturePhotoMaxQuality(callback: PhotoCaptureCallback) {
+        val owner = lifecycleOwner
+        val currentStream = stream
+        if (owner == null || currentStream == null) {
+            postError("Camera stream is not ready for photo capture.", null)
+            return
+        }
+
+        owner.lifecycleScope.launch(Dispatchers.Default) {
+            currentStream.capturePhoto()
+                .onSuccess { photoData ->
+                    val original = decodePhotoData(photoData)
+                    if (original == null) {
+                        postError("Could not decode the high-quality photo capture.", null)
+                        return@onSuccess
+                    }
+
+                    val blurred = original.copy(Bitmap.Config.ARGB_8888, true)
+                    if (blurred == null) {
+                        original.recycle()
+                        postError("Could not prepare the high-quality photo for blurring.", null)
+                        return@onSuccess
+                    }
+
+                    var regions: List<FaceRegion> = emptyList()
+                    if (blurMode != BlurMode.OFF) {
+                        try {
+                            regions = faceBlurProcessor.facesToBlur(blurred, blurMode)
+                            faceBlurProcessor.blurRegions(blurred, regions)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "High-quality photo blur failed: ${e.message}", e)
+                        }
+                    }
+
+                    mainHandler.post {
+                        callback.onPhoto(
+                            original,
+                            blurred.copy(Bitmap.Config.ARGB_8888, false) ?: blurred,
+                            regions.toTypedArray(),
+                        )
+                    }
+                }
+                .onFailure { error, _ ->
+                    postError("High-quality photo capture failed: ${error.description}", null)
+                }
+        }
+    }
+
+    private fun decodePhotoData(photo: PhotoData): Bitmap? {
+        return try {
+            when (photo) {
+                is PhotoData.Bitmap -> photo.bitmap.copy(Bitmap.Config.ARGB_8888, false)
+                is PhotoData.HEIC -> {
+                    val bytes = ByteArray(photo.data.remaining())
+                    photo.data.get(bytes)
+                    val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+                    applyExifTransform(bitmap, exifTransform(bytes))
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Photo decode failed: ${e.message}", e)
+            null
+        }
+    }
+
     private fun handleVideoFrame(frame: VideoFrame) {
-        val bitmap = YuvToBitmapConverter.convert(frame.buffer, frame.width, frame.height) ?: return
+        val frameNo = ++framesReceived
+        if (frameNo == 1L) {
+            Log.i(
+                TAG,
+                "First video frame from glasses: ${frame.width}x${frame.height}, " +
+                    "buffer=${frame.buffer.remaining()} bytes, " +
+                    "I420 needs ${frame.width * frame.height * 3 / 2}",
+            )
+        }
+
+        val bitmap = YuvToBitmapConverter.convert(frame.buffer, frame.width, frame.height)
+        if (bitmap == null) {
+            val failures = ++frameConversionFailures
+            if (failures == 1L || failures % 60L == 0L) {
+                Log.e(
+                    TAG,
+                    "YUV->Bitmap conversion FAILED (x$failures): ${frame.width}x${frame.height}, " +
+                        "buffer=${frame.buffer.remaining()} bytes, " +
+                        "I420 needs ${frame.width * frame.height * 3 / 2}",
+                )
+            }
+            return
+        }
+
+        // Disarm the stall watchdog only once a frame has actually survived conversion. A frame that
+        // arrives and then fails to convert still leaves the preview blank, so it must not count.
+        streamWatchdogJob?.cancel(); streamWatchdogJob = null
+
         // Mutable copy so we can blur in place and the UI can hold it while the converter
         // reuses its cached bitmap for the next frame.
         val work = bitmap.copy(Bitmap.Config.ARGB_8888, true) ?: return
@@ -588,6 +754,8 @@ class GlassesManager(private val appContext: Context) {
         // Snapshot the pristine (pre-blur) frame only when a photo is actually being captured, so
         // the hot path stays a single copy in the common case.
         val capture = pendingPhotoCapture
+        val originalForListener =
+            if (deliverOriginalFrames) bitmap.copy(Bitmap.Config.ARGB_8888, false) else null
         val originalForCapture =
             if (capture != null) work.copy(Bitmap.Config.ARGB_8888, false) else null
 
@@ -619,7 +787,19 @@ class GlassesManager(private val appContext: Context) {
             mainHandler.post { capture.onPhoto(originalForCapture, blurredForCapture, regionArray) }
         }
 
-        listener?.let { l -> mainHandler.post { l.onCameraFrame(work) } }
+        val activeListener = listener
+        if (activeListener == null) {
+            Log.w(TAG, "Frame #$frameNo converted but no listener is attached — preview will stay blank.")
+            return
+        }
+        val delivered = ++framesDelivered
+        if (delivered == 1L) {
+            Log.i(TAG, "First frame delivered to UI listener (${work.width}x${work.height}).")
+        }
+        mainHandler.post {
+            if (originalForListener != null) activeListener.onOriginalCameraFrame(originalForListener)
+            activeListener.onCameraFrame(work)
+        }
     }
 
     /**
@@ -667,8 +847,11 @@ class GlassesManager(private val appContext: Context) {
         // experimental — the display link and relay upload usually cap the achievable rate well
         // below this, which is exactly what the actual-vs-requested readout is for.
         val fps = requestedFps.coerceIn(0, 80)
-        val dimension = maxDimension.coerceIn(64, 320)
-        val quality = jpegQuality.coerceIn(20, 80)
+        // Previous relay-safe caps, kept for rollback:
+        // val dimension = maxDimension.coerceIn(64, 320)
+        // val quality = jpegQuality.coerceIn(20, 80)
+        val dimension = maxDimension.coerceIn(64, QUALITY_FIRST_PREVIEW_MAX_DIMENSION)
+        val quality = jpegQuality.coerceIn(20, QUALITY_FIRST_PREVIEW_JPEG_QUALITY)
         val periodMs = if (fps <= 0) 0L else (1000L / fps).coerceAtLeast(1L)
         val modeName = if (useLiveCameraFrames) "live HTTPS relay" else "HTTPS control"
 
@@ -855,6 +1038,60 @@ class GlassesManager(private val appContext: Context) {
         }
     }
 
+    private fun exifTransform(imageBytes: ByteArray): Matrix {
+        val matrix = Matrix()
+        val orientation = try {
+            ByteArrayInputStream(imageBytes).use { input ->
+                ExifInterface(input).getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION,
+                    ExifInterface.ORIENTATION_NORMAL,
+                )
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not read photo EXIF orientation: ${e.message}")
+            ExifInterface.ORIENTATION_NORMAL
+        }
+
+        when (orientation) {
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.postScale(-1f, 1f)
+            ExifInterface.ORIENTATION_ROTATE_180 -> matrix.postRotate(180f)
+            ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.postScale(1f, -1f)
+            ExifInterface.ORIENTATION_TRANSPOSE -> {
+                matrix.postRotate(90f)
+                matrix.postScale(-1f, 1f)
+            }
+            ExifInterface.ORIENTATION_ROTATE_90 -> matrix.postRotate(90f)
+            ExifInterface.ORIENTATION_TRANSVERSE -> {
+                matrix.postRotate(270f)
+                matrix.postScale(-1f, 1f)
+            }
+            ExifInterface.ORIENTATION_ROTATE_270 -> matrix.postRotate(270f)
+            ExifInterface.ORIENTATION_NORMAL,
+            ExifInterface.ORIENTATION_UNDEFINED -> Unit
+        }
+        return matrix
+    }
+
+    private fun applyExifTransform(bitmap: Bitmap, matrix: Matrix): Bitmap {
+        if (matrix.isIdentity) return bitmap
+        return try {
+            val transformed = Bitmap.createBitmap(
+                bitmap,
+                0,
+                0,
+                bitmap.width,
+                bitmap.height,
+                matrix,
+                true,
+            )
+            if (transformed !== bitmap) bitmap.recycle()
+            transformed
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not apply photo EXIF orientation: ${e.message}")
+            bitmap
+        }
+    }
+
     private fun addCacheBuster(baseUrl: String, sequence: Long): String {
         val separator = if (baseUrl.contains('?')) '&' else '?'
         return "$baseUrl${separator}blurr_frame=$sequence"
@@ -999,7 +1236,9 @@ class GlassesManager(private val appContext: Context) {
         videoJob?.cancel(); videoJob = null
         streamStateJob?.cancel(); streamStateJob = null
         streamErrorJob?.cancel(); streamErrorJob = null
-        stream?.stop()
+        streamWatchdogJob?.cancel(); streamWatchdogJob = null
+        camera?.close()
+        camera = null
         stream = null
 
         deviceSession?.let { session ->
@@ -1021,12 +1260,16 @@ class GlassesManager(private val appContext: Context) {
     }
 
     private fun postStatus(status: String) {
+        // Mirror to logcat as well as the UI — otherwise the whole connect/stream flow is invisible
+        // to `adb logcat` and failures can only be read off the phone screen.
+        Log.i(TAG, "Status: $status")
         listener?.let { l ->
             mainHandler.post { l.onStatusChanged(status) }
         }
     }
 
     private fun postError(message: String, throwable: Throwable?) {
+        Log.e(TAG, "Error: $message", throwable)
         listener?.let { l ->
             mainHandler.post { l.onError(message, throwable) }
         }

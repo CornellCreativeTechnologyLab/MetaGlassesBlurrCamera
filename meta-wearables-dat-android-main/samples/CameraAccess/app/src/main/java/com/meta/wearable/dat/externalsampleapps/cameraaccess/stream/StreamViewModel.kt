@@ -43,6 +43,14 @@ import com.meta.wearable.dat.core.selectors.DeviceSelector
 import com.meta.wearable.dat.core.session.DeviceSession
 import com.meta.wearable.dat.core.session.DeviceSessionState
 import com.meta.wearable.dat.core.types.DeviceSessionError
+import com.meta.wearable.dat.display.Display
+import com.meta.wearable.dat.display.addDisplay
+import com.meta.wearable.dat.display.removeDisplay
+import com.meta.wearable.dat.display.types.DisplayState
+import com.meta.wearable.dat.display.views.Direction
+import com.meta.wearable.dat.display.views.FlexBoxBackground
+import com.meta.wearable.dat.display.views.TextColor
+import com.meta.wearable.dat.display.views.TextStyle
 import com.meta.wearable.dat.externalsampleapps.cameraaccess.wearables.WearablesViewModel
 import java.io.ByteArrayInputStream
 import java.io.File
@@ -83,6 +91,12 @@ class StreamViewModel(
 
   // Presentation queue for buffering frames after color conversion
   private var presentationQueue: PresentationQueue? = null
+
+  // Glasses-display streaming status (best-effort — not all glasses models expose a display)
+  private var display: Display? = null
+  private var displayStateJob: Job? = null
+  private var displayTickerJob: Job? = null
+  private var streamStartElapsedMs: Long? = null
 
   fun startStream() {
     videoJob?.cancel()
@@ -198,6 +212,7 @@ class StreamViewModel(
               ?.onFailure { error, _ ->
                 Log.e(TAG, "Failed to add stream to session: ${error.description}")
               }
+          attachDisplay()
         } else if (currentState == DeviceSessionState.PAUSED) {
           // Tap gesture paused the session — keep the stream alive.
           // The SDK transitions StreamState to PAUSED internally.
@@ -220,11 +235,98 @@ class StreamViewModel(
     sessionStateJob = null
     presentationQueue?.stop()
     presentationQueue = null
+    stopDisplay()
     _uiState.update { INITIAL_STATE }
     stream?.stop()
     stream = null
     session?.stop()
     session = null
+  }
+
+  // -- Glasses-display streaming status (best-effort) --
+
+  private fun attachDisplay() {
+    session
+        ?.addDisplay()
+        ?.onSuccess { addedDisplay ->
+          display = addedDisplay
+          displayStateJob = viewModelScope.launch {
+            addedDisplay.state.collect { state ->
+              if (state == DisplayState.STARTED) {
+                startStatusTicker()
+              }
+            }
+          }
+        }
+        ?.onFailure { error, _ ->
+          // Not all glasses models expose a display capability — this must never block
+          // or interrupt camera streaming, so we only log it.
+          Log.w(TAG, "Display capability unavailable: ${error.description}")
+        }
+  }
+
+  private fun startStatusTicker() {
+    displayTickerJob?.cancel()
+    streamStartElapsedMs = android.os.SystemClock.elapsedRealtime()
+    displayTickerJob = viewModelScope.launch {
+      while (_uiState.value.streamState == StreamState.STREAMING) {
+        val elapsedMs = android.os.SystemClock.elapsedRealtime() - (streamStartElapsedMs ?: 0L)
+        sendStatusContent(elapsedMs)
+        kotlinx.coroutines.delay(1000L)
+      }
+    }
+  }
+
+  private fun sendStatusContent(elapsedMs: Long) {
+    val elapsedText = formatElapsed(elapsedMs)
+    viewModelScope.launch {
+      display
+          ?.sendContent {
+            flexBox(
+                direction = Direction.COLUMN,
+                gap = 4,
+                padding = 16,
+                background = FlexBoxBackground.CARD,
+            ) {
+              text("● Streaming", style = TextStyle.HEADING)
+              text(elapsedText, style = TextStyle.META, color = TextColor.SECONDARY)
+            }
+          }
+          ?.onFailure { error, _ ->
+            Log.w(TAG, "Failed to send display content: ${error.description}")
+          }
+    }
+  }
+
+  private fun formatElapsed(elapsedMs: Long): String {
+    val totalSeconds = elapsedMs / 1000
+    val minutes = totalSeconds / 60
+    val seconds = totalSeconds % 60
+    return "%02d:%02d".format(minutes, seconds)
+  }
+
+  private fun stopDisplay() {
+    displayTickerJob?.cancel()
+    displayTickerJob = null
+    displayStateJob?.cancel()
+    displayStateJob = null
+    streamStartElapsedMs = null
+    val activeDisplay = display
+    if (activeDisplay != null) {
+      viewModelScope.launch {
+        activeDisplay
+            .sendContent {
+              flexBox(direction = Direction.COLUMN, gap = 4, padding = 16) {
+                text("Stopped", style = TextStyle.HEADING)
+              }
+            }
+            .onFailure { error, _ ->
+              Log.w(TAG, "Failed to send final display content: ${error.description}")
+            }
+      }
+      session?.removeDisplay()
+      display = null
+    }
   }
 
   private fun handleSessionError(error: DeviceSessionError) {

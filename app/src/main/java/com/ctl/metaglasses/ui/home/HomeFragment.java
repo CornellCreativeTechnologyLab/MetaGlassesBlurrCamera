@@ -94,6 +94,11 @@ public class HomeFragment extends Fragment {
             }
 
             @Override
+            public void onOriginalCameraFrame(android.graphics.Bitmap bitmap) {
+                bitmap.recycle();
+            }
+
+            @Override
             public void onTranslationOutput(String text) {
                 if (binding != null) {
                     binding.textTranslation.setText(text);

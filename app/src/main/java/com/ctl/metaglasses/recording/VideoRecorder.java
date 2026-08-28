@@ -1,12 +1,12 @@
 package com.ctl.metaglasses.recording;
 
 import android.Manifest;
-import android.content.ContentResolver;
-import android.content.ContentValues;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
+import android.media.AudioDeviceInfo;
 import android.media.AudioFormat;
+import android.media.AudioManager;
 import android.media.AudioRecord;
 import android.media.Image;
 import android.media.MediaCodec;
@@ -14,21 +14,18 @@ import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
 import android.media.MediaMuxer;
 import android.media.MediaRecorder;
-import android.net.Uri;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
-import android.os.ParcelFileDescriptor;
-import android.provider.MediaStore;
 import android.util.Log;
 
 import androidx.core.content.ContextCompat;
 
+import java.io.File;
 import java.nio.ByteBuffer;
 
 /**
- * Records the (already blurred) camera frames to an MP4 in the gallery, with sound from the phone
- * microphone.
+ * Records camera frames to an MP4 in Blurr's app-private gallery, with sound from the phone mic.
  *
  * The glasses camera stream carries no audio (the DAT SDK exposes video frames only), so audio is
  * captured from the phone's mic via {@link AudioRecord}, encoded to AAC, and muxed as a second track
@@ -43,8 +40,9 @@ import java.nio.ByteBuffer;
 public class VideoRecorder {
 
     private static final String TAG = "VideoRecorder";
+    private static final String AUDIO_TAG = "VideoRecorderAudio";
     private static final String VIDEO_MIME = "video/avc";
-    private static final int FRAME_RATE = 24;
+    private static final int FRAME_RATE = 15;
 
     private static final String AUDIO_MIME = "audio/mp4a-latm";
     private static final int SAMPLE_RATE = 44100;
@@ -52,13 +50,15 @@ public class VideoRecorder {
     private static final int AUDIO_BIT_RATE = 96_000;
 
     private final Context ctx;
+    private final long captureId;
+    private final boolean originalBackup;
+    private final boolean recordAudio;
     private HandlerThread thread;
     private Handler handler;
 
     private MediaCodec encoder;             // video
     private MediaMuxer muxer;
-    private ParcelFileDescriptor pfd;
-    private Uri outputUri;
+    private File outputFile;
     private final MediaCodec.BufferInfo bufferInfo = new MediaCodec.BufferInfo();
 
     private final Object muxerLock = new Object();
@@ -80,6 +80,16 @@ public class VideoRecorder {
 
     public VideoRecorder(Context context) {
         this.ctx = context.getApplicationContext();
+        this.captureId = System.currentTimeMillis();
+        this.originalBackup = false;
+        this.recordAudio = true;
+    }
+
+    public VideoRecorder(Context context, long captureId, boolean originalBackup) {
+        this.ctx = context.getApplicationContext();
+        this.captureId = captureId;
+        this.originalBackup = originalBackup;
+        this.recordAudio = !originalBackup;
     }
 
     public boolean isReady() {
@@ -91,6 +101,7 @@ public class VideoRecorder {
         if (thread != null) return; // already starting/started
         width = frameWidth & ~1;   // encoders require even dimensions
         height = frameHeight & ~1;
+        startNs = System.nanoTime(); // set NOW so audio and video share the same clock reference
         thread = new HandlerThread("VideoRecorder");
         thread.start();
         handler = new Handler(thread.getLooper());
@@ -110,10 +121,9 @@ public class VideoRecorder {
         MediaFormat format = MediaFormat.createVideoFormat(VIDEO_MIME, width, height);
         format.setInteger(MediaFormat.KEY_COLOR_FORMAT,
                 MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible);
-        // The frames arriving from the glasses are already lossy (Bluetooth-compressed), so keep the
-        // re-encode bitrate generous — a low bitrate here adds a second layer of blocky grain on top.
-        // ~8 bits/pixel (capped at 12 Mbps) is plenty for 720p and preserves the source detail.
-        int bitRate = (int) Math.min(12_000_000L, width * (long) height * 8);
+        // The frames arriving from the glasses are already lossy, so keep the re-encode bitrate high.
+        // At 720x1280 this lands around 20 Mbps, capped for encoder safety.
+        int bitRate = (int) Math.min(24_000_000L, width * (long) height * 22);
         format.setInteger(MediaFormat.KEY_BIT_RATE, bitRate);
         format.setInteger(MediaFormat.KEY_FRAME_RATE, FRAME_RATE);
         format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
@@ -122,22 +132,18 @@ public class VideoRecorder {
         encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
         encoder.start();
 
-        ContentValues values = new ContentValues();
-        String name = "Blurr_" + System.currentTimeMillis() + ".mp4";
-        values.put(MediaStore.Video.Media.DISPLAY_NAME, name);
-        values.put(MediaStore.Video.Media.MIME_TYPE, "video/mp4");
-        values.put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/Blurr");
-        values.put(MediaStore.Video.Media.IS_PENDING, 1);
-
-        ContentResolver resolver = ctx.getContentResolver();
-        outputUri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values);
-        if (outputUri == null) throw new IllegalStateException("Could not create MediaStore entry");
-        pfd = resolver.openFileDescriptor(outputUri, "rw");
-        muxer = new MediaMuxer(pfd.getFileDescriptor(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+        outputFile = originalBackup
+                ? MediaSaver.appOriginalVideoFile(ctx, captureId)
+                : MediaSaver.appVideoFile(ctx, captureId);
+        muxer = new MediaMuxer(outputFile.getAbsolutePath(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
     }
 
     /** Sets up the mic + AAC encoder. On any failure, leaves audioEnabled=false (video-only). */
     private void initAudio() {
+        if (!recordAudio) {
+            Log.i(TAG, "Audio disabled for original backup recorder.");
+            return;
+        }
         if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO)
                 != PackageManager.PERMISSION_GRANTED) {
             Log.i(TAG, "RECORD_AUDIO not granted; recording video-only.");
@@ -161,11 +167,47 @@ public class VideoRecorder {
             if (audioRecord.getState() != AudioRecord.STATE_INITIALIZED) {
                 throw new IllegalStateException("AudioRecord not initialized");
             }
+            selectPreferredInput();
             audioEnabled = true;
+            Log.i(AUDIO_TAG, "Audio ready: " + SAMPLE_RATE + "Hz mono, AAC " + AUDIO_BIT_RATE + "bps");
         } catch (Exception e) {
-            Log.w(TAG, "Audio init failed; recording video-only. " + e.getMessage());
+            Log.w(AUDIO_TAG, "Audio init failed; recording video-only. " + e.getMessage());
             releaseAudio();
             audioEnabled = false;
+        }
+    }
+
+    /**
+     * Logs all audio inputs. The Meta glasses expose a Bluetooth SCO device but have no actual
+     * audio source (camera-only), so we prefer the phone's built-in microphone for recording.
+     */
+    private void selectPreferredInput() {
+        try {
+            AudioManager am = (AudioManager) ctx.getSystemService(Context.AUDIO_SERVICE);
+            if (am == null || audioRecord == null) return;
+            AudioDeviceInfo phoneMic = null;
+            for (AudioDeviceInfo d : am.getDevices(AudioManager.GET_DEVICES_INPUTS)) {
+                Log.i(AUDIO_TAG, "Input device: name=" + d.getProductName()
+                        + " type=" + d.getType() + " id=" + d.getId());
+                // Prefer the phone's built-in microphone (types 1=MIC, 15=UNKNOWN/default).
+                // Skip Bluetooth (the glasses have no audio).
+                if (phoneMic == null && (d.getType() == AudioDeviceInfo.TYPE_BUILTIN_MIC
+                        || (d.getType() == 15 && d.getProductName().toString().contains("SM-F")))) {
+                    phoneMic = d;
+                }
+            }
+            if (phoneMic != null) {
+                boolean ok = audioRecord.setPreferredDevice(phoneMic);
+                Log.i(AUDIO_TAG, "Preferred phone mic set=" + ok
+                        + " name=" + phoneMic.getProductName() + " type=" + phoneMic.getType());
+            } else {
+                Log.i(AUDIO_TAG, "No phone mic found; using system default.");
+            }
+            AudioDeviceInfo routed = audioRecord.getRoutedDevice();
+            Log.i(AUDIO_TAG, "Actual routed input type="
+                    + (routed != null ? routed.getType() : "unknown"));
+        } catch (Exception e) {
+            Log.w(AUDIO_TAG, "Input device selection failed; using default mic. " + e.getMessage());
         }
     }
 
@@ -239,6 +281,8 @@ public class VideoRecorder {
         if (audioEnabled && audioTrackIndex < 0) return;
         muxer.start();
         muxerStarted = true;
+        Log.i(AUDIO_TAG, "Muxer started. videoTrack=" + videoTrackIndex
+                + " audioTrack=" + audioTrackIndex + " audioEnabled=" + audioEnabled);
     }
 
     /** Queues a frame for encoding. Safe to call before/after the recorder is ready (frames drop). */
@@ -262,7 +306,6 @@ public class VideoRecorder {
     private void doEncode(int[] pixels, int srcW, int srcH) {
         if (encoder == null || !ready) return;
         long now = System.nanoTime();
-        if (startNs < 0) startNs = now;
         long ptsUs = (now - startNs) / 1000;
 
         int index = encoder.dequeueInputBuffer(10_000);
@@ -282,7 +325,7 @@ public class VideoRecorder {
         if (endOfStream) {
             int index = encoder.dequeueInputBuffer(10_000);
             if (index >= 0) {
-                long ptsUs = startNs < 0 ? 0 : (System.nanoTime() - startNs) / 1000;
+                long ptsUs = (System.nanoTime() - startNs) / 1000;
                 encoder.queueInputBuffer(index, 0, 0, ptsUs, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
             }
         }
@@ -324,14 +367,12 @@ public class VideoRecorder {
         }
         ready = false;
         h.post(() -> {
-            boolean ok = false;
             try {
                 // Finish audio first so its final samples are written before the muxer stops.
                 stopAudioAndJoin();
                 if (encoder != null) drain(true);
                 synchronized (muxerLock) {
                     if (muxerStarted) muxer.stop();
-                    ok = muxerStarted;
                 }
             } catch (Exception e) {
                 Log.e(TAG, "stop/drain failed: " + e.getMessage());
@@ -339,17 +380,6 @@ public class VideoRecorder {
             releaseAudio();
             try { if (muxer != null) muxer.release(); } catch (Exception ignored) {}
             try { if (encoder != null) { encoder.stop(); encoder.release(); } } catch (Exception ignored) {}
-            try { if (pfd != null) pfd.close(); } catch (Exception ignored) {}
-
-            try {
-                if (outputUri != null) {
-                    ContentValues done = new ContentValues();
-                    done.put(MediaStore.Video.Media.IS_PENDING, 0);
-                    ctx.getContentResolver().update(outputUri, done, null, null);
-                }
-            } catch (Exception e) {
-                Log.e(TAG, "publish failed: " + e.getMessage());
-            }
 
             encoder = null;
             muxer = null;

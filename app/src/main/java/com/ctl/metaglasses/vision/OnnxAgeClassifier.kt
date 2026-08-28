@@ -62,8 +62,13 @@ class OnnxAgeClassifier @JvmOverloads constructor(
     }
 
     override fun isLikelyMinor(faceBitmap: Bitmap): Boolean {
-        val ortSession = session ?: return true // fail safe: unknown => treat as minor
-        val environment = env ?: return true
+        return classify(faceBitmap).shouldBlurForMinors
+    }
+
+    override fun classify(faceBitmap: Bitmap, quality: FaceQuality): AgeVerdict {
+        val ortSession = session ?: return AgeVerdict.unknown("model-not-loaded", quality, MODEL_ASSET)
+        val environment = env ?: return AgeVerdict.unknown("runtime-not-ready", quality, MODEL_ASSET)
+        if (!quality.passes) return AgeVerdict.unknown("quality-gate", quality, MODEL_ASSET)
 
         return synchronized(lock) {
             var input: OnnxTensor? = null
@@ -78,11 +83,37 @@ class OnnxAgeClassifier @JvmOverloads constructor(
                     @Suppress("UNCHECKED_CAST")
                     val probs = (result[0].value as Array<FloatArray>)[0]
                     val adultIndex = if (minorClassIndex == 0) 1 else 0
-                    probs[minorClassIndex] >= probs[adultIndex]
+                    val pMinor = probs[minorClassIndex].coerceIn(0f, 1f)
+                    when {
+                        pMinor <= 0.01f -> AgeVerdict(
+                            AgeLabel.ADULT_CONFIRMED,
+                            pMinor,
+                            null,
+                            quality.score,
+                            listOf("onnx-adult-confirmed"),
+                            MODEL_ASSET,
+                        )
+                        pMinor >= probs[adultIndex] -> AgeVerdict(
+                            AgeLabel.MINOR,
+                            pMinor,
+                            null,
+                            quality.score,
+                            listOf("onnx-minor-probability"),
+                            MODEL_ASSET,
+                        )
+                        else -> AgeVerdict(
+                            AgeLabel.UNKNOWN,
+                            pMinor,
+                            null,
+                            quality.score,
+                            listOf("onnx-uncertain"),
+                            MODEL_ASSET,
+                        )
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "ONNX inference failed: ${e.message}")
-                true // fail safe
+                AgeVerdict.unknown("inference-failed", quality, MODEL_ASSET)
             } finally {
                 input?.close()
             }
