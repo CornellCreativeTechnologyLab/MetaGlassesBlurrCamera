@@ -1,0 +1,109 @@
+{
+  "version": 1,
+  "tracking": {
+    "embeddingCosineThreshold": 0.38,
+    "iouThreshold": 0.30,
+    "staleTrackFrames": 45
+  },
+  "ageCache": {
+    "qualityRefreshDelta": 0.10,
+    "refreshFrames": 60
+  },
+  "models": [
+ 
+    {
+      "id": "retinaface",
+      "role": "detector",
+      "type": "retinaface",
+      "assetPath": "models/detection/retinaface.onnx",
+      "enabled": false,
+      "inputWidth": 640,
+      "inputHeight": 640,
+      "inputLayout": "NCHW",
+      "normalization": "minus_one_to_one",
+      "threshold": 0.50,
+      "weight": 1.0
+    },
+  {
+  "id": "w600k-r50",
+  "role": "embedder",
+  "type": "arcface-r50",
+  "assetPath": "models/embedding/w600k_r50_int8.onnx",
+  "sourcePath": "models/embedding/w600k_r50_int8.onnx",
+  "enabled": true,
+  "inputWidth": 112,
+  "inputHeight": 112,
+  "inputLayout": "NCHW",
+  "normalization": "minus_one_to_one",
+  "embeddingDim": 512,
+  "weight": 1.0
+},
+{
+  "id": "2d106det",
+  "role": "aligner",
+  "type": "landmark-106",
+  "assetPath": "models/alignment/2d106det_int8.onnx",
+  "sourcePath": "models/alignment/2d106det_int8.onnx",
+  "enabled": false,
+  "inputWidth": 192,
+  "inputHeight": 192,
+  "inputLayout": "NCHW",
+  "normalization": "rgb_0_255",
+  "weight": 1.0
+},
+{
+  "id": "petalface-dev",
+  "role": "embedder",
+  "type": "petalface",
+  "assetPath": "models/embedding/petalface_swin_arcface_wf4m_tinyface_int8.onnx",
+  "sourcePath": "models/embedding/petalface_swin_arcface_wf4m_tinyface_int8.onnx",
+  "enabled": false,
+  "inputWidth": 112,
+  "inputHeight": 112,
+  "inputLayout": "NCHW",
+  "normalization": "minus_one_to_one",
+  "embeddingDim": 512,
+  "weight": 1.0
+},
+{
+  "id": "age-googlenet",
+  "role": "age",
+  "type": "age-googlenet",
+  "assetPath": "models/age/age_googlenet_int8.onnx",
+  "sourcePath": "models/age/age_googlenet_int8.onnx",
+  "enabled": true,
+  "inputWidth": 224,
+  "inputHeight": 224,
+  "inputLayout": "NCHW",
+  "normalization": "bgr_mean_104_117_123",
+  "weight": 1.0
+},
+{
+  "id": "genderage",
+  "role": "age",
+  "type": "genderage",
+  "assetPath": "models/age/genderage_int8.onnx",
+  "sourcePath": "models/age/genderage_int8.onnx",
+  "enabled": true,
+  "inputWidth": 96,
+  "inputHeight": 96,
+  "inputLayout": "NCHW",
+  "normalization": "rgb_0_255",
+  "weight": 0.8
+},
+{
+  "id": "osnet-x1-0-reid",
+  "role": "tracker",
+  "type": "osnet-reid",
+  "assetPath": "models/tracking/osnet_x1_0_reid.onnx",
+  "sourcePath": "models/tracking/osnet_x1_0_reid.onnx",
+  "enabled": false,
+  "inputWidth": 128,
+  "inputHeight": 256,
+  "inputLayout": "NCHW",
+  "normalization": "imagenet",
+  "embeddingDim": 512,
+  "weight": 1.0
+}
+  ]
+}

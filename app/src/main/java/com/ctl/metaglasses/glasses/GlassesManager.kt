@@ -15,12 +15,19 @@ import androidx.activity.result.ActivityResultLauncher
 import androidx.exifinterface.media.ExifInterface
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.lifecycleScope
-import com.meta.wearable.dat.camera.Camera
 import com.meta.wearable.dat.camera.Stream
+// SDK 0.9.0 removed DeviceSession.addStream()/removeStream() and routes streaming through the
+// Camera capability instead. Old 0.8.0 imports, kept for reference:
+//     import com.meta.wearable.dat.camera.addStream
+//     import com.meta.wearable.dat.camera.removeStream
+import com.meta.wearable.dat.camera.Camera
 import com.meta.wearable.dat.camera.addCamera
+import com.meta.wearable.dat.camera.removeCamera
+import com.meta.wearable.dat.camera.types.CameraState
 import com.meta.wearable.dat.camera.types.PhotoData
 import com.meta.wearable.dat.camera.types.StreamConfiguration
 import com.meta.wearable.dat.camera.types.StreamError
+import com.meta.wearable.dat.camera.types.StreamState
 import com.meta.wearable.dat.camera.types.VideoFrame
 import com.meta.wearable.dat.camera.types.VideoQuality
 import com.meta.wearable.dat.core.Wearables
@@ -83,6 +90,13 @@ class GlassesManager(private val appContext: Context) {
         private const val STREAM_START_TIMEOUT_MS = 10_000L
 
         private const val QUALITY_FIRST_STREAM_FPS = 7
+
+// Per the DAT camera-streaming skill doc and the official CameraAccess sample, MEDIUM/24
+        // is the reference configuration. The docs also note that lower resolution and frame rate
+        // usually produce *better* visual quality per frame over Bluetooth, so this is not simply a
+        // quality downgrade. Switch to HIGH here if a future firmware/DAT build sustains it.
+        private val STREAM_QUALITY = VideoQuality.MEDIUM
+        private const val STREAM_FPS = 24
         private const val QUALITY_FIRST_PREVIEW_MAX_DIMENSION = 1280
         private const val QUALITY_FIRST_PREVIEW_JPEG_QUALITY = 95
 
@@ -120,7 +134,11 @@ class GlassesManager(private val appContext: Context) {
     private var lifecycleOwner: LifecycleOwner? = null
     private var deviceSession: DeviceSession? = null
     private var display: Display? = null
+    // SDK 0.9.0 wrapped the stream in a Camera handle (`private var camera: Camera? = null`);
+    // 0.9.0 wraps the stream in a Camera capability that owns the hardware lifecycle; the Stream
+    // itself is reached through camera.stream. (0.8.0's addStream returned the Stream directly.)
     private var camera: Camera? = null
+    private var cameraStateJob: Job? = null
     private var stream: Stream? = null
     private var cameraPermissionLauncher: ActivityResultLauncher<Permission>? = null
     // Selects the first available glasses. Reused for both device-availability waiting
@@ -369,13 +387,20 @@ class GlassesManager(private val appContext: Context) {
                                 if (display == null) attachDisplay(session)
                                 if (streamRequested && stream == null) ensureCameraThenAttach(session)
                             }
+                            // The wearer's tap gesture pauses the session; the SDK resumes the
+                            // existing stream internally, so the stream must be left alone here
+                            // (see the DAT CameraAccess sample).
+                            DeviceSessionState.PAUSED -> {
+                                Log.w(TAG, "Session PAUSED (tap gesture) — camera is off, keeping stream alive.")
+                                postStatus("Glasses camera paused — tap the glasses to resume.")
+                            }
                             DeviceSessionState.STOPPED -> {
                                 sessionStarted = false
                                 displayReady = false
                                 sessionRequested = false
-                                camera?.close()
-                                camera = null
                                 stream = null
+                                camera = null
+                                cameraStateJob?.cancel(); cameraStateJob = null
                                 deviceSession = null
                                 pendingSessionDeviceId = null
                                 postStatus("Session stopped. Waiting for glasses to reconnect...")
@@ -386,7 +411,7 @@ class GlassesManager(private val appContext: Context) {
                                 deviceWaitJob = null
                                 waitForDeviceThenCreateSession()
                             }
-                            else -> {}
+                            else -> Log.i(TAG, "Session state: $state")
                         }
                     }
                 }
@@ -510,6 +535,9 @@ class GlassesManager(private val appContext: Context) {
         owner.lifecycleScope.launch {
             Wearables.checkPermissionStatus(Permission.CAMERA)
                 .onSuccess { status ->
+                    // Meta camera consent is granted per DAT application id. Changing the app id in
+                    // local.properties invalidates a previous grant, so log exactly what came back.
+                    Log.i(TAG, "Meta camera permission status = $status")
                     cameraPermissionGranted = status == PermissionStatus.Granted
                     if (cameraPermissionGranted) {
                         attachStream(session)
@@ -549,12 +577,78 @@ class GlassesManager(private val appContext: Context) {
         streamStateJob?.cancel(); streamStateJob = null
         streamErrorJob?.cancel(); streamErrorJob = null
         streamWatchdogJob?.cancel(); streamWatchdogJob = null
+        cameraStateJob?.cancel(); cameraStateJob = null
 
-        camera?.close()
-        camera = null
+        stream?.stop()
+        camera?.stop()
         stream = null
+        camera = null
 
         postStatus("Camera stream stopped.")
+    }
+
+    /**
+     * Drops the current stream and its collectors so another [attachStream] attempt can start
+     * cleanly. Unlike [stopVideoStream] this keeps [streamRequested]/[streaming] set, because the
+     * user still wants a preview — only the configuration is changing.
+     */
+    /**
+     * (Re)arms the stall detector. Cancelled by handleVideoFrame as soon as one frame survives
+     * conversion, so reaching the end of the delay means no usable frame arrived.
+     */
+    private fun armStreamWatchdog(session: DeviceSession) {
+        val owner = lifecycleOwner ?: return
+        // The DAT stream can report success while its underlying data channel never actually
+        // bootstraps (seen as repeated SERVICE_NOT_FOUND retries in logcat when Developer Mode
+        // isn't enabled for this device in the Meta AI app) — no frame ever arrives and the UI
+        // silently sits in "connecting" forever. Surface that instead of hanging.
+        // The watchdog is cancelled by handleVideoFrame as soon as one frame survives
+        // conversion. Reaching the end of this delay therefore means no usable frame arrived.
+        streamWatchdogJob?.cancel()
+        streamWatchdogJob = owner.lifecycleScope.launch {
+            delay(STREAM_START_TIMEOUT_MS)
+            Log.e(
+                TAG,
+                "Stream stalled after ${STREAM_START_TIMEOUT_MS}ms: " +
+                    "received=$framesReceived converted-failures=$frameConversionFailures " +
+                    "delivered=$framesDelivered",
+            )
+            postError(
+                if (framesReceived > 0L) {
+                    "Camera frames are arriving but cannot be decoded ($frameConversionFailures " +
+                        "conversion failures). This is a frame-format mismatch, not a pairing problem."
+                } else {
+                    "Camera is on (CameraState STARTED, StreamState STREAMING, permission " +
+                        "Granted) but the glasses sent no video. Everything on the phone side " +
+                        "checks out, so update the glasses firmware from the Meta AI app — the DAT " +
+                        "version matrix requires firmware V125+ for this SDK."
+                },
+                null,
+            )
+            stopVideoStream()
+        }
+    }
+
+    private fun teardownStreamForRetry(session: DeviceSession) {
+        videoJob?.cancel(); videoJob = null
+        streamStateJob?.cancel(); streamStateJob = null
+        streamErrorJob?.cancel(); streamErrorJob = null
+        streamWatchdogJob?.cancel(); streamWatchdogJob = null
+
+        // The stream capability stays registered on the session until it is explicitly removed;
+        // without this the retry fails with "A capability of this type is already active".
+        try {
+            // 0.8.0 teardown, kept for reference:
+            //     stream?.stop(); stream?.close(); session.removeStream()
+            stream?.stop()
+            camera?.stop()
+            camera?.close()
+            session.removeCamera()
+        } catch (e: Exception) {
+            Log.w(TAG, "Camera teardown before retry failed: ${e.message}")
+        }
+        stream = null
+        camera = null
     }
 
     private fun attachStream(session: DeviceSession) {
@@ -567,24 +661,67 @@ class GlassesManager(private val appContext: Context) {
 
         // Quality-first stream: HIGH is the glasses' top live resolution (720x1280 vs MEDIUM's
         // 504x896). Lower FPS gives each frame more bandwidth over the glasses link.
-        // Previous balanced setting, kept for rollback:
-        // StreamConfiguration(videoQuality = VideoQuality.HIGH, frameRate = 15)
+        // Valid frame rates are 2/7/15/24/30.
+        //
+        // SDK 0.9.0 path, kept for when the glasses' DAT app supports it (see libs.versions.toml):
+        //     session.addCamera(StreamConfiguration(...)).onSuccess { addedCamera ->
+        //         camera = addedCamera
+        //         val newStream = addedCamera.stream
+        // On 0.9.0 this returned success but the DWA stream channel failed SERVICE_NOT_FOUND,
+        // so videoStream never emitted a single frame.
+        Log.i(TAG, "Attaching stream with $STREAM_QUALITY @ ${STREAM_FPS}fps.")
+        // The CameraAccess sample clears any previous stream before adding one, so a re-attach
+        // never races a stale capability.
+        videoJob?.cancel(); videoJob = null
+        streamStateJob?.cancel(); streamStateJob = null
+        streamErrorJob?.cancel(); streamErrorJob = null
+        cameraStateJob?.cancel(); cameraStateJob = null
+        stream?.stop()
+        camera?.stop()
+        stream = null
+        camera = null
+
+        // 0.8.0 attach path, kept for reference:
+        //     session.addStream(
+        //         StreamConfiguration(videoQuality = STREAM_QUALITY, frameRate = STREAM_FPS),
+        //     ).onSuccess { newStream -> stream = newStream; ... }
         session.addCamera(
-            StreamConfiguration(videoQuality = VideoQuality.HIGH, frameRate = QUALITY_FIRST_STREAM_FPS),
+            StreamConfiguration(videoQuality = STREAM_QUALITY, frameRate = STREAM_FPS),
         ).onSuccess { addedCamera ->
             camera = addedCamera
             val newStream = addedCamera.stream
             stream = newStream
             postStatus("Camera stream starting...")
 
+            // The Camera capability owns the hardware lifecycle in 0.9.0, so its state is tracked
+            // separately from StreamState — a camera stuck short of STARTED explains a silent stream.
+            cameraStateJob = owner.lifecycleScope.launch {
+                addedCamera.state.collect { cameraState ->
+                    Log.i(TAG, "CameraState: $cameraState")
+                    if (cameraState == CameraState.STOPPED && framesReceived == 0L) {
+                        Log.w(TAG, "Camera reported STOPPED before any frame arrived.")
+                    }
+                }
+            }
+
             // Convert frames off the main thread; deliver bitmaps to the UI.
             videoJob = owner.lifecycleScope.launch(Dispatchers.Default) {
+                Log.i(TAG, "Collecting videoStream…")
                 newStream.videoStream.collect { frame -> handleVideoFrame(frame) }
+                // Reaching here means the Flow completed. That is very different from a Flow that
+                // stays open but silent, so it is logged distinctly.
+                Log.w(TAG, "videoStream collection ENDED after $framesReceived frames.")
             }
 
             streamStateJob = owner.lifecycleScope.launch {
                 newStream.state.collect { state ->
                     postStatus("Camera stream: $state")
+                    // Bootstrapping to STREAMING can take several seconds. Restart the stall timer
+                    // here so each configuration gets a full window of *actual* streaming before it
+                    // is judged silent, instead of spending most of the window connecting.
+                    if (state == StreamState.STREAMING && framesReceived == 0L) {
+                        armStreamWatchdog(session)
+                    }
                 }
             }
 
@@ -599,40 +736,15 @@ class GlassesManager(private val appContext: Context) {
                 }
             }
 
-            newStream.start().onFailure { error, _ ->
+            newStream.start().onSuccess {
+                Log.i(TAG, "stream.start() succeeded.")
+            }.onFailure { error, _ ->
                 streamRequested = false
                 streaming = false
                 postError("Failed to start camera stream: ${error.description}", null)
             }
 
-            // The DAT stream can report success while its underlying data channel never actually
-            // bootstraps (seen as repeated SERVICE_NOT_FOUND retries in logcat when Developer Mode
-            // isn't enabled for this device in the Meta AI app) — no frame ever arrives and the UI
-            // silently sits in "connecting" forever. Surface that instead of hanging.
-            // The watchdog is cancelled by handleVideoFrame as soon as one frame survives
-            // conversion. Reaching the end of this delay therefore means no usable frame arrived.
-            streamWatchdogJob?.cancel()
-            streamWatchdogJob = owner.lifecycleScope.launch {
-                delay(STREAM_START_TIMEOUT_MS)
-                Log.e(
-                    TAG,
-                    "Stream stalled after ${STREAM_START_TIMEOUT_MS}ms: " +
-                        "received=$framesReceived converted-failures=$frameConversionFailures " +
-                        "delivered=$framesDelivered",
-                )
-                postError(
-                    if (framesReceived > 0L) {
-                        "Camera frames are arriving but cannot be decoded ($frameConversionFailures " +
-                            "conversion failures). This is a frame-format mismatch, not a pairing problem."
-                    } else {
-                        "Camera stream isn't sending frames. If the glasses camera light is on but " +
-                            "nothing appears, enable Developer Mode for this device in the Meta AI app " +
-                            "(App connections / Developer mode apps) and reconnect."
-                    },
-                    null,
-                )
-                stopVideoStream()
-            }
+            armStreamWatchdog(session)
         }.onFailure { error, _ ->
             streamRequested = false
             streaming = false
@@ -1237,9 +1349,11 @@ class GlassesManager(private val appContext: Context) {
         streamStateJob?.cancel(); streamStateJob = null
         streamErrorJob?.cancel(); streamErrorJob = null
         streamWatchdogJob?.cancel(); streamWatchdogJob = null
-        camera?.close()
-        camera = null
+        cameraStateJob?.cancel(); cameraStateJob = null
+        stream?.stop()
+        camera?.stop()
         stream = null
+        camera = null
 
         deviceSession?.let { session ->
             session.removeDisplay().onFailure { error, _ ->

@@ -2,6 +2,15 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+
+    <meta-data android:name="com.meta.wearable.mwdat.APPLICATION_ID" android:value="1548117126578266" />
+<meta-data android:name="com.meta.wearable.mwdat.CLIENT_TOKEN" android:value="AR|1548117126578266|5353ddcb495388d0ae7ae9a8c20e2378" />
+
+
+<meta-data
+    android:name="com.meta.wearable.mwdat.ANALYTICS_OPT_OUT"
+    android:value="true"
+    />
     <uses-feature
         android:name="android.hardware.camera"
         android:required="false" />
@@ -38,7 +47,7 @@
             android:value="@string/mwdat_client_token" />
         <meta-data
             android:name="com.meta.wearable.mwdat.DAM_ENABLED"
-            android:value="true" />
+            android:value="false" />
         <meta-data
             android:name="com.meta.wearable.mwdat.ANALYTICS_OPT_OUT"
             android:value="true" />
@@ -98,6 +107,14 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <!-- Bare DAT streaming test surface. Launch with:
+             adb shell am start -n com.ctl.metaglasses/.glasses.RawStreamTestActivity -->
+        <activity
+            android:name=".glasses.RawStreamTestActivity"
+            android:exported="true"
+            android:label="Raw Stream Test" />
+
     </application>
 
 </manifest>

@@ -10,6 +10,16 @@ lifecycleLivedataKtx = "2.11.0"
 lifecycleViewmodelKtx = "2.11.0"
 navigationFragment = "2.9.8"
 navigationUi = "2.9.8"
+# DAT SDK. Pinned to 0.9.0 to match the Meta AI app installed on this phone.
+# Per the official version matrix (wearables.developer.meta.com/docs/version-dependencies):
+#   SDK 0.8.0 -> Meta AI V275,  SDK 0.9.0 -> Meta AI V282
+# The phone runs com.facebook.stella V287, and the docs state the toolkit is version-locked
+# rather than backward-compatible. On 0.8.0 the whole handshake succeeded (session STARTED,
+# permission Granted, StreamState STREAMING, camera LED on) while videoStream delivered zero
+# frames -- the signature of an SDK/companion-app mismatch.
+#
+# Previous rollback pin, kept for reference:
+#   mwdat = "0.8.0"
 mwdat = "0.9.0"
 kotlin = "2.1.0"
 kotlinxCoroutines = "1.8.0"
